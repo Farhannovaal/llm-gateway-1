@@ -4,8 +4,14 @@ services:
     ports: ["3000:3000"]
     env_file: [.env]
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3000/readyz').then(r=>{if(r.ok)process.exit(0);process.exit(1)}).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      
 
   # ollama:
   #   image: ollama/ollama:latest
