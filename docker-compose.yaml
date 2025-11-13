@@ -1,21 +1,32 @@
 services:
   llm-gateway:
     build: .
-    ports: ["3000:3000"]
-    env_file: [.env]
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NODE_OPTIONS=--max_old_space_size=2048 
     restart: unless-stopped
+    depends_on:
+      qdrant:
+        condition: service_started
     healthcheck:
-      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:3000/readyz').then(r=>{if(r.ok)process.exit(0);process.exit(1)}).catch(()=>process.exit(1))\""]
+      test: ["CMD", "curl", "-f", "http://localhost:3000/readyz"]
       interval: 15s
       timeout: 5s
-      retries: 3
+      retries: 5
     extra_hosts:
       - "host.docker.internal:host-gateway"
-      
 
-  # ollama:
-  #   image: ollama/ollama:latest
-  #   container_name: ollama
-  #   ports: ["11434:11434"]
-  #   volumes: ["./.ollama:/root/.ollama"]
-  #   restart: unless-stopped
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant:/qdrant/storage
+    restart: unless-stopped
+
+volumes:
+  qdrant: {}

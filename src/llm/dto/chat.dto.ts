@@ -1,9 +1,12 @@
-import { Type } from 'class-transformer';
 import { IsArray, IsIn, IsString, ValidateNested } from 'class-validator';
+import { Type } from 'class-transformer';
+import { ChatMessage } from '../llm.service';
 
-class MsgDto {
-  @IsIn(['system','user','assistant'])
-  role!: 'system'|'user'|'assistant';
+export class ChatMessageDto implements ChatMessage {
+  @IsIn(['system', 'user', 'assistant'])
+  @IsString()
+  role!: 'system' | 'user' | 'assistant';
+
   @IsString()
   content!: string;
 }
@@ -11,6 +14,6 @@ class MsgDto {
 export class ChatDto {
   @IsArray()
   @ValidateNested({ each: true })
-  @Type(() => MsgDto)
-  messages!: MsgDto[];
+  @Type(() => ChatMessageDto)
+  messages!: ChatMessageDto[];
 }

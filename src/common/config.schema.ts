@@ -11,7 +11,11 @@ export class EnvSchema {
 
   @IsString()
   @IsOptional()
-  OLLAMA_BASE_URL?: string; 
+  OLLAMA_BASE_URL?: string;
+
+  @IsString()
+  @IsOptional()
+  EMBEDDING_MODEL_ID?: string;
 
   @IsString()
   @IsOptional()
@@ -27,4 +31,12 @@ export class EnvSchema {
   @IsString()
   @IsOptional()
   RATE_LIMIT_PER_MIN?: string;
+
+  @IsString()
+  @IsOptional()
+  QDRANT_URL?: string;
+
+  @IsString()
+  @IsOptional()
+  QDRANT_COLLECTION?: string;
 }

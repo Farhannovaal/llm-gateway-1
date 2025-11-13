@@ -1,10 +1,15 @@
 import { Injectable } from '@nestjs/common';
-import { LlmService } from '../llm/llm.service';
-import { ChatMessage } from '../llm/types';
+import { LlmService, ChatMessage } from '../llm/llm.service';
 
 @Injectable()
 export class ChatService {
-  constructor(private llm: LlmService) {}
-  chat(messages: ChatMessage[]) { return this.llm.chat(messages); }
-  stream(messages: ChatMessage[]) { return this.llm.stream(messages); }
+  constructor(private readonly llm: LlmService) {}
+
+  chat(messages: ChatMessage[]) {
+    return this.llm.chat(messages);
+  }
+
+  stream(messages: ChatMessage[]) {
+    return this.llm.stream(messages);
+  }
 }

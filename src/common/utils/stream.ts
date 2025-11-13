@@ -5,20 +5,33 @@ export function textToSSE(textStream: AsyncIterable<string>): Observable<Message
   const logger = new Logger('SSE');
   const started = performance.now();
   let chars = 0;
+  let full = '';
 
-  return new Observable<MessageEvent>(observer => {
+  return new Observable<MessageEvent>((observer) => {
     (async () => {
       try {
         for await (const chunk of textStream) {
-          if (chunk) chars += chunk.length;
-          observer.next({ data: chunk });
+          if (!chunk) continue;
+
+          chars += chunk.length;
+          full += chunk;
+
+          observer.next({
+            data: JSON.stringify({
+              delta: chunk,  
+              full,     
+            }),
+          });
         }
+
         const ms = Math.round(performance.now() - started);
         logger.log(`stream done in ${ms}ms chars=${chars}`);
         observer.complete();
       } catch (err: any) {
         const ms = Math.round(performance.now() - started);
-        logger.warn(`stream error after ${ms}ms chars=${chars}: ${err?.message || err}`);
+        logger.warn(
+          `stream error after ${ms}ms chars=${chars}: ${err?.message || err}`,
+        );
         observer.error(err);
       }
     })();
