@@ -12,6 +12,7 @@ import { UserThrottlerGuard } from './common/guards/user-throttler.guard';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { LlmService } from './llm/llm.service';
+import { ChatDbModule } from './chat-db/chat-db.module';
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { LlmService } from './llm/llm.service';
     ChatModule,
     HealthModule,
     RagModule,
+    ChatDbModule
   ],
   providers: [
     { provide: APP_GUARD, useClass: UserThrottlerGuard },

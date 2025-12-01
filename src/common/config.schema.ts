@@ -39,4 +39,28 @@ export class EnvSchema {
   @IsString()
   @IsOptional()
   QDRANT_COLLECTION?: string;
+
+  @IsString()
+  @IsOptional()
+  CHAT_DB_HOST?: string;
+
+  @IsString()
+  @IsOptional()
+  CHAT_DB_PORT?: string;
+
+  @IsString()
+  @IsOptional()
+  CHAT_DB_USER?: string;
+
+  @IsString()
+  @IsOptional()
+  CHAT_DB_PASS?: string;
+
+  @IsString()
+  @IsOptional()
+  CHAT_DB_NAME?: string;
+
+  @IsString()
+  @IsOptional()
+  CHAT_DB_LOGGING?: string; 
 }
