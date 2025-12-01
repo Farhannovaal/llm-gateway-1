@@ -42,7 +42,12 @@ class SearchDto {
   @IsString({ each: true })
   @Transform(({ value }) => {
     if (Array.isArray(value)) return value;
-    if (typeof value === 'string' && value.length > 0) return [value];
+    if (typeof value === 'string' && value.length > 0) {
+      return value
+        .split(',')
+        .map((x) => x.trim())
+        .filter(Boolean);
+    }
     return [];
   })
   tags?: string[];

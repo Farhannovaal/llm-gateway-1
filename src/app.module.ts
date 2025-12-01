@@ -13,6 +13,7 @@ import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { LlmService } from './llm/llm.service';
 import { ChatDbModule } from './chat-db/chat-db.module';
+import { ChatAnalyticsModule } from './chat-analytics/chat-analytics.module';
 
 @Module({
   imports: [
@@ -27,7 +28,8 @@ import { ChatDbModule } from './chat-db/chat-db.module';
     ChatModule,
     HealthModule,
     RagModule,
-    ChatDbModule
+    ChatDbModule,
+    ChatAnalyticsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: UserThrottlerGuard },

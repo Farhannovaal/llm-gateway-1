@@ -83,4 +83,17 @@ export class ChatLogService {
 
     return { sessionId: session.id };
   }
+
+  async getRecentTurns(
+    sessionId: string,
+    limit = 6,
+  ): Promise<ChatTurn[]> {
+    return this.turnRepo
+      .createQueryBuilder('t')
+      .innerJoin('t.session', 's')
+      .where('s.id = :sid', { sid: sessionId })
+      .orderBy('t.createdAt', 'DESC')
+      .limit(limit)
+      .getMany();
+  }
 }

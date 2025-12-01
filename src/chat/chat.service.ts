@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { LlmService, ChatMessage } from '../llm/llm.service';
 import { ChatRagService, RagMode } from './chat-rag.service';
 import { ChatLogService } from '../chat-db/chat-log.service';
+import { ChatTurn } from '../chat-db/entities/chat-turn.entity';
 
 interface ChatOptions {
   tags?: string[];
@@ -12,6 +13,8 @@ interface ChatOptions {
 
 @Injectable()
 export class ChatService {
+  private readonly historyMaxTurns = 6;
+
   constructor(
     private readonly llm: LlmService,
     private readonly chatRag: ChatRagService,
@@ -79,10 +82,41 @@ export class ChatService {
     return `Sekarang ${tanggal}, pukul ${jam} WIB.`;
   }
 
+  private async buildHistoryPrefix(
+    sessionId?: string,
+  ): Promise<{ historyText: string | null; usedHistory: boolean }> {
+    if (!sessionId) {
+      return { historyText: null, usedHistory: false };
+    }
+
+    const turns: ChatTurn[] = await this.chatLog.getRecentTurns(
+      sessionId,
+      this.historyMaxTurns,
+    );
+
+    if (!turns.length) {
+      return { historyText: null, usedHistory: false };
+    }
+
+    const sorted = [...turns].sort(
+      (a, b) => a.createdAt.getTime() - b.createdAt.getTime(),
+    );
+
+    const historyText = sorted
+      .map(
+        (t, idx) =>
+          `[${idx + 1}]\nUSER: ${t.userText}\nASSISTANT: ${t.assistantText}`,
+      )
+      .join('\n\n');
+
+    return { historyText, usedHistory: true };
+  }
+
   async chat(messages: ChatMessage[], options?: ChatOptions) {
     const withSys = this.withSystem(messages);
     const q = this.getLastUserText(withSys);
 
+    // Shortcut pertanyaan waktu/tanggal
     if (this.isDateOrTimeQuestion(q)) {
       const text = this.buildNowText();
 
@@ -98,14 +132,28 @@ export class ChatService {
         hitsCount: 0,
         modelId: null,
         latencyMs: 0,
-        meta: { kind: 'date-time-shortcut' },
+        meta: { kind: 'date-time-shortcut', usedHistory: false },
       });
 
       return { text };
     }
 
+    const { historyText, usedHistory } = await this.buildHistoryPrefix(
+      options?.sessionId,
+    );
+
+    const userQuery = historyText
+      ? [
+          'Riwayat percakapan sebelumnya:',
+          historyText,
+          '',
+          'Pertanyaan terbaru pengguna:',
+          q,
+        ].join('\n')
+      : q;
+
     const started = Date.now();
-    const res = await this.chatRag.answer(q, {
+    const res = await this.chatRag.answer(userQuery, {
       tags: options?.tags,
       mode: options?.mode,
     });
@@ -123,7 +171,7 @@ export class ChatService {
       hitsCount: res.hitsCount,
       modelId: process.env.MODEL_ID || null,
       latencyMs,
-      meta: null,
+      meta: usedHistory ? { usedHistory: true } : null,
     });
 
     return { text: res.text, sessionId };
@@ -165,12 +213,26 @@ export class ChatService {
           hitsCount: 0,
           modelId: null,
           latencyMs,
-          meta: { kind: 'date-time-shortcut' },
+          meta: { kind: 'date-time-shortcut', usedHistory: false },
         });
       }
 
       return gen();
     }
+
+    const { historyText, usedHistory } = await this.buildHistoryPrefix(
+      options?.sessionId,
+    );
+
+    const userQuery = historyText
+      ? [
+          'Riwayat percakapan sebelumnya:',
+          historyText,
+          '',
+          'Pertanyaan terbaru pengguna:',
+          q,
+        ].join('\n')
+      : q;
 
     const started = Date.now();
     const {
@@ -179,7 +241,7 @@ export class ChatService {
       mode,
       usedRag,
       hitsCount,
-    } = await this.chatRag.smartStream(q, {
+    } = await this.chatRag.smartStream(userQuery, {
       tags: options?.tags,
       mode: options?.mode,
     });
@@ -208,7 +270,7 @@ export class ChatService {
         hitsCount,
         modelId: process.env.MODEL_ID || null,
         latencyMs,
-        meta: null,
+        meta: usedHistory ? { usedHistory: true } : null,
       });
     }
 
