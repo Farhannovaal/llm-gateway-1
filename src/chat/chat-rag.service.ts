@@ -7,6 +7,7 @@ export type RagMode = 'auto' | 'rag-only' | 'llm-only';
 export interface ChatRagOptions {
   tags?: string[];
   mode?: RagMode;
+  historyText?: string | null;
 }
 
 export interface ChatRagAnswer {
@@ -34,7 +35,6 @@ export class ChatRagService {
     private readonly rag: RagService,
   ) {
     const env = (process.env.CHAT_RAG_MODE ?? 'auto').toLowerCase();
-
     if (env === 'rag-only' || env === 'llm-only' || env === 'auto') {
       this.defaultMode = env;
     } else {
@@ -55,41 +55,69 @@ export class ChatRagService {
       .join('\n\n');
   }
 
-  private buildRagMessages(context: string, userQuery: string): ChatMessage[] {
+  private buildUserContent(
+    userQuery: string,
+    historyText?: string | null,
+    context?: string,
+  ): string {
+    const blocks: string[] = [];
+
+    if (historyText) {
+      blocks.push(
+        'RIWAYAT OBROLAN SEBELUMNYA (ringkas):\n' + historyText,
+      );
+    }
+
+    if (context) {
+      blocks.push('CONTEXT (dokumen hasil RAG):\n' + context);
+    }
+
+    blocks.push('PERTANYAAN PENGGUNA SAAT INI:\n' + userQuery);
+
+    return blocks.join('\n\n');
+  }
+
+  private buildRagMessages(
+    context: string,
+    userQuery: string,
+    historyText?: string | null,
+  ): ChatMessage[] {
     const sys = [
       'Kamu adalah asisten AI internal Farhan.',
-      'CONTEXT berisi catatan referensi tentang Farhan, sistem, dan pengetahuan terkait.',
-      'Gunakan CONTEXT sebagai sumber fakta tambahan untuk menjawab pertanyaan pengguna.',
+      'CONTEXT berisi potongan dokumen referensi dari sistem internal.',
+      'Jika ada RIWAYAT OBROLAN, gunakan itu untuk menjaga konsistensi konteks percakapan.',
+      'Gunakan CONTEXT hanya sebagai fakta tambahan. Jika tidak relevan, katakan jujur.',
       'Jawablah dengan gaya natural seperti chat, sopan, dan ringkas.',
       'Gunakan bahasa Indonesia jika pengguna memakai bahasa Indonesia.',
       'Jika informasi yang diminta tidak ada atau tidak cukup jelas di CONTEXT, katakan dengan jujur bahwa kamu belum punya informasi tersebut berdasarkan data yang ada.',
-      'Tidak perlu menyebut istilah teknis internal (seperti nama server, database, framework, dan sejenisnya) kecuali pengguna bertanya langsung.',
-      'Jika konteks berbicara tentang Farhan, gunakan sudut pandang orang ketiga, contoh: "Farhan lahir di Bandung tahun 2003", bukan "Saya lahir...".',
     ].join(' ');
 
     return [
       { role: 'system', content: sys },
       {
         role: 'user',
-        content: `CONTEXT:\n${context}\n\nPERTANYAAN:\n${userQuery}`,
+        content: this.buildUserContent(userQuery, historyText, context),
       },
     ];
   }
 
-  private buildNormalMessages(userQuery: string): ChatMessage[] {
+  private buildNormalMessages(
+    userQuery: string,
+    historyText?: string | null,
+  ): ChatMessage[] {
+    const sys = [
+      'Kamu adalah asisten AI internal Farhan.',
+      'Jawab dengan gaya natural, sopan, dan tidak kaku seperti robot.',
+      'Jawaban harus singkat, jelas, dan pakai bahasa Indonesia kalau pengguna pakai bahasa Indonesia.',
+      'Jika ada RIWAYAT OBROLAN dalam input, gunakan secukupnya untuk menjaga konteks.',
+      'Tidak perlu menyebut istilah teknis internal (server, gateway, database) kecuali pengguna bertanya langsung.',
+    ].join(' ');
+
     return [
-      {
-        role: 'system',
-        content: [
-          'Kamu adalah asisten AI internal Farhan.',
-          'Jawab dengan gaya natural, sopan, dan tidak kaku seperti robot.',
-          'Jawaban harus singkat, jelas, dan pakai bahasa Indonesia kalau pengguna pakai bahasa Indonesia.',
-          'Tidak perlu menyebut istilah teknis internal (seperti nama server, gateway, database) kecuali pengguna bertanya langsung tentang itu.',
-        ].join(' '),
-      },
+      { role: 'system', content: sys },
       {
         role: 'user',
-        content: userQuery,
+        content: this.buildUserContent(userQuery, historyText, undefined),
       },
     ];
   }
@@ -99,9 +127,12 @@ export class ChatRagService {
     options?: ChatRagOptions,
   ): Promise<ChatRagAnswer> {
     const mode = this.resolveMode(options);
+    const historyText = options?.historyText ?? null;
 
     if (mode === 'llm-only') {
-      const res = await this.llm.chat(this.buildNormalMessages(userQuery));
+      const res = await this.llm.chat(
+        this.buildNormalMessages(userQuery, historyText),
+      );
       return {
         text: res.text,
         references: [],
@@ -126,7 +157,7 @@ export class ChatRagService {
         };
       }
 
-      const messages = this.buildNormalMessages(userQuery);
+      const messages = this.buildNormalMessages(userQuery, historyText);
       const res = await this.llm.chat(messages);
 
       return {
@@ -139,7 +170,7 @@ export class ChatRagService {
     }
 
     const context = this.buildContext(hits);
-    const messages = this.buildRagMessages(context, userQuery);
+    const messages = this.buildRagMessages(context, userQuery, historyText);
     const res = await this.llm.chat(messages);
 
     return {
@@ -160,10 +191,11 @@ export class ChatRagService {
     options?: ChatRagOptions,
   ): Promise<ChatRagStreamResult> {
     const mode = this.resolveMode(options);
+    const historyText = options?.historyText ?? null;
 
     if (mode === 'llm-only') {
       const baseStream = await this.llm.stream(
-        this.buildNormalMessages(userQuery),
+        this.buildNormalMessages(userQuery, historyText),
       );
       return {
         stream: baseStream,
@@ -198,9 +230,10 @@ export class ChatRagService {
       };
     }
 
-    const messages = hits.length
-      ? this.buildRagMessages(this.buildContext(hits), userQuery)
-      : this.buildNormalMessages(userQuery);
+    const context = hits.length ? this.buildContext(hits) : undefined;
+    const messages = context
+      ? this.buildRagMessages(context, userQuery, historyText)
+      : this.buildNormalMessages(userQuery, historyText);
 
     const baseStream = await this.llm.stream(messages);
 

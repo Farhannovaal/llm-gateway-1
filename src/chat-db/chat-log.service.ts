@@ -34,6 +34,19 @@ export class ChatLogService {
     private readonly refRepo: Repository<ChatReference>,
   ) {}
 
+  async getRecentTurns(
+    sessionId: string,
+    limit = 5,
+  ): Promise<ChatTurn[]> {
+    if (!sessionId) return [];
+
+    return this.turnRepo.find({
+      where: { session: { id: sessionId } },
+      order: { createdAt: 'DESC' },
+      take: limit,
+    });
+  }
+
   async saveTurn(input: SaveTurnInput): Promise<{ sessionId: string }> {
     let session: ChatSession | null = null;
 
@@ -82,18 +95,5 @@ export class ChatLogService {
     }
 
     return { sessionId: session.id };
-  }
-
-  async getRecentTurns(
-    sessionId: string,
-    limit = 6,
-  ): Promise<ChatTurn[]> {
-    return this.turnRepo
-      .createQueryBuilder('t')
-      .innerJoin('t.session', 's')
-      .where('s.id = :sid', { sid: sessionId })
-      .orderBy('t.createdAt', 'DESC')
-      .limit(limit)
-      .getMany();
   }
 }

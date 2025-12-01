@@ -1,3 +1,4 @@
+// src/chat/chat.service.ts
 import { Injectable } from '@nestjs/common';
 import { LlmService, ChatMessage } from '../llm/llm.service';
 import { ChatRagService, RagMode } from './chat-rag.service';
@@ -13,7 +14,7 @@ interface ChatOptions {
 
 @Injectable()
 export class ChatService {
-  private readonly historyMaxTurns = 6;
+  private readonly historyLimit = 5;
 
   constructor(
     private readonly llm: LlmService,
@@ -82,41 +83,37 @@ export class ChatService {
     return `Sekarang ${tanggal}, pukul ${jam} WIB.`;
   }
 
-  private async buildHistoryPrefix(
-    sessionId?: string,
-  ): Promise<{ historyText: string | null; usedHistory: boolean }> {
-    if (!sessionId) {
-      return { historyText: null, usedHistory: false };
-    }
+  /** Utility: potong teks panjang supaya history tidak kebablasan */
+  private truncate(text: string, max = 400): string {
+    if (!text) return '';
+    if (text.length <= max) return text;
+    return text.slice(0, max) + '…';
+  }
 
-    const turns: ChatTurn[] = await this.chatLog.getRecentTurns(
-      sessionId,
-      this.historyMaxTurns,
-    );
+  /** Format history turn → string ringkas untuk dimasukkan ke prompt */
+  private formatHistory(turns: ChatTurn[]): string {
+    if (!turns.length) return '';
 
-    if (!turns.length) {
-      return { historyText: null, usedHistory: false };
-    }
-
-    const sorted = [...turns].sort(
+    // `getRecentTurns` balikin DESC, kita pengen oldest → newest
+    const ordered = [...turns].sort(
       (a, b) => a.createdAt.getTime() - b.createdAt.getTime(),
     );
 
-    const historyText = sorted
+    return ordered
       .map(
-        (t, idx) =>
-          `[${idx + 1}]\nUSER: ${t.userText}\nASSISTANT: ${t.assistantText}`,
+        (t) =>
+          `USER: ${this.truncate(t.userText)}\nASSISTANT: ${this.truncate(
+            t.assistantText,
+          )}`,
       )
       .join('\n\n');
-
-    return { historyText, usedHistory: true };
   }
 
   async chat(messages: ChatMessage[], options?: ChatOptions) {
     const withSys = this.withSystem(messages);
     const q = this.getLastUserText(withSys);
 
-    // Shortcut pertanyaan waktu/tanggal
+    // Shortcut: tanya tanggal/jam → langsung jawab, tanpa RAG/history.
     if (this.isDateOrTimeQuestion(q)) {
       const text = this.buildNowText();
 
@@ -132,32 +129,39 @@ export class ChatService {
         hitsCount: 0,
         modelId: null,
         latencyMs: 0,
-        meta: { kind: 'date-time-shortcut', usedHistory: false },
+        meta: { kind: 'date-time-shortcut' },
       });
 
       return { text };
     }
 
-    const { historyText, usedHistory } = await this.buildHistoryPrefix(
-      options?.sessionId,
-    );
+    // --- Ambil history dari DB kalau ada sessionId ---
+    let historyText: string | null = null;
+    let historyTurnsCount = 0;
 
-    const userQuery = historyText
-      ? [
-          'Riwayat percakapan sebelumnya:',
-          historyText,
-          '',
-          'Pertanyaan terbaru pengguna:',
-          q,
-        ].join('\n')
-      : q;
+    if (options?.sessionId) {
+      const historyTurns = await this.chatLog.getRecentTurns(
+        options.sessionId,
+        this.historyLimit,
+      );
+      if (historyTurns.length) {
+        historyText = this.formatHistory(historyTurns);
+        historyTurnsCount = historyTurns.length;
+      }
+    }
 
     const started = Date.now();
-    const res = await this.chatRag.answer(userQuery, {
+    const res = await this.chatRag.answer(q, {
       tags: options?.tags,
       mode: options?.mode,
+      historyText,
     });
     const latencyMs = Date.now() - started;
+
+    const meta =
+      historyText && historyTurnsCount > 0
+        ? { usedHistory: true, historyTurns: historyTurnsCount }
+        : null;
 
     const { sessionId } = await this.chatLog.saveTurn({
       sessionId: options?.sessionId,
@@ -171,7 +175,7 @@ export class ChatService {
       hitsCount: res.hitsCount,
       modelId: process.env.MODEL_ID || null,
       latencyMs,
-      meta: usedHistory ? { usedHistory: true } : null,
+      meta,
     });
 
     return { text: res.text, sessionId };
@@ -184,6 +188,7 @@ export class ChatService {
     const withSys = this.withSystem(messages);
     const q = this.getLastUserText(withSys);
 
+    // Shortcut date/time, sama seperti di chat()
     if (this.isDateOrTimeQuestion(q)) {
       const answer = this.buildNowText();
       const self = this;
@@ -213,26 +218,27 @@ export class ChatService {
           hitsCount: 0,
           modelId: null,
           latencyMs,
-          meta: { kind: 'date-time-shortcut', usedHistory: false },
+          meta: { kind: 'date-time-shortcut' },
         });
       }
 
       return gen();
     }
 
-    const { historyText, usedHistory } = await this.buildHistoryPrefix(
-      options?.sessionId,
-    );
+    // Ambil history dulu
+    let historyText: string | null = null;
+    let historyTurnsCount = 0;
 
-    const userQuery = historyText
-      ? [
-          'Riwayat percakapan sebelumnya:',
-          historyText,
-          '',
-          'Pertanyaan terbaru pengguna:',
-          q,
-        ].join('\n')
-      : q;
+    if (options?.sessionId) {
+      const historyTurns = await this.chatLog.getRecentTurns(
+        options.sessionId,
+        this.historyLimit,
+      );
+      if (historyTurns.length) {
+        historyText = this.formatHistory(historyTurns);
+        historyTurnsCount = historyTurns.length;
+      }
+    }
 
     const started = Date.now();
     const {
@@ -241,10 +247,16 @@ export class ChatService {
       mode,
       usedRag,
       hitsCount,
-    } = await this.chatRag.smartStream(userQuery, {
+    } = await this.chatRag.smartStream(q, {
       tags: options?.tags,
       mode: options?.mode,
+      historyText,
     });
+
+    const meta =
+      historyText && historyTurnsCount > 0
+        ? { usedHistory: true, historyTurns: historyTurnsCount }
+        : null;
 
     const self = this;
 
@@ -270,7 +282,7 @@ export class ChatService {
         hitsCount,
         modelId: process.env.MODEL_ID || null,
         latencyMs,
-        meta: usedHistory ? { usedHistory: true } : null,
+        meta,
       });
     }
 

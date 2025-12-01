@@ -1,6 +1,9 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import {
+  In,
+  Repository,
+} from 'typeorm';
 
 import { ChatTurn } from '../chat-db/entities/chat-turn.entity';
 import { ChatReference } from '../chat-db/entities/chat-reference.entity';
@@ -8,50 +11,16 @@ import { ChatSession } from '../chat-db/entities/chat-session.entity';
 import { CHAT_DB_CONNECTION } from '../chat-db/chat-db.module';
 import { LlmService, ChatMessage } from '../llm/llm.service';
 
-export interface DailySummaryItem {
-  day: string;
-  totalTurns: number;
-  turnsUsedRag: number;
-  pctUsedRag: number;
-  avgLatencyMs: number | null;
-}
-
-export interface SourceUsageItem {
-  source: string;
-  totalRefs: number;
-}
-
-export interface HistoryUsageItem {
-  day: string;
-  totalTurns: number;
-  turnsWithHistory: number;
-}
-
-export interface ModeUsageItem {
-  mode: string;
-  totalTurns: number;
-  turnsUsedRag: number;
-  avgLatencyMs: number | null;
-}
-
-export interface SessionSummaryItem {
-  sessionId: string;
-  totalTurns: number;
-  usedRagTurns: number;
-  hasHistory: boolean;
-  lastActivityAt: string | null;
-  summary: string;
-}
-
-export interface GlobalSummary {
-  totalSessions: number;
-  totalTurns: number;
-  totalRagTurns: number;
-  pctUsedRag: number;
-  avgLatencyMs: number | null;
-  topSources: SourceUsageItem[];
-}
-
+import {
+  DailySummaryItem,
+  SourceUsageItem,
+  HistoryUsageItem,
+  ModeUsageItem,
+  SessionSummaryItem,
+  GlobalSummary,
+  SessionListItem,
+  SessionTurnItem,
+} from './chat-analytics.types';
 
 @Injectable()
 export class ChatAnalyticsService {
@@ -68,9 +37,14 @@ export class ChatAnalyticsService {
     private readonly llm: LlmService,
   ) {}
 
-  async getDailySummary(days = 30): Promise<DailySummaryItem[]> {
+  private getSince(days: number): Date {
     const since = new Date();
     since.setDate(since.getDate() - days);
+    return since;
+  }
+
+  async getDailySummary(days = 30): Promise<DailySummaryItem[]> {
+    const since = this.getSince(days);
 
     const rows = await this.turnRepo
       .createQueryBuilder('t')
@@ -129,8 +103,7 @@ export class ChatAnalyticsService {
   }
 
   async getHistoryUsage(days = 30): Promise<HistoryUsageItem[]> {
-    const since = new Date();
-    since.setDate(since.getDate() - days);
+    const since = this.getSince(days);
 
     const rows = await this.turnRepo
       .createQueryBuilder('t')
@@ -162,8 +135,7 @@ export class ChatAnalyticsService {
   }
 
   async getModeUsage(days = 30): Promise<ModeUsageItem[]> {
-    const since = new Date();
-    since.setDate(since.getDate() - days);
+    const since = this.getSince(days);
 
     const rows = await this.turnRepo
       .createQueryBuilder('t')
@@ -208,7 +180,7 @@ export class ChatAnalyticsService {
     }
 
     const turns = await this.turnRepo.find({
-      where: { session: { id: sessionId } as any },
+      where: { session: { id: sessionId } },
       order: { createdAt: 'ASC' },
       take: maxTurns,
     });
@@ -274,9 +246,11 @@ export class ChatAnalyticsService {
     };
   }
 
-    async getGlobalSummary(days = 30, topSourceLimit = 5): Promise<GlobalSummary> {
-    const since = new Date();
-    since.setDate(since.getDate() - days);
+  async getGlobalSummary(
+    days = 30,
+    topSourceLimit = 5,
+  ): Promise<GlobalSummary> {
+    const since = this.getSince(days);
 
     const sessionRow = await this.sessionRepo
       .createQueryBuilder('s')
@@ -322,5 +296,128 @@ export class ChatAnalyticsService {
       avgLatencyMs,
       topSources,
     };
+  }
+
+  async listSessions(
+    limit = 20,
+    offset = 0,
+    userId?: string,
+  ): Promise<{
+    items: SessionListItem[];
+    total: number;
+    limit: number;
+    offset: number;
+  }> {
+    const where: Record<string, any> = {};
+    if (userId) {
+      where.userId = userId;
+    }
+
+    const [sessions, total] = await this.sessionRepo.findAndCount({
+      where,
+      order: {
+        lastActivityAt: 'DESC',
+        createdAt: 'DESC',
+      },
+      take: limit,
+      skip: offset,
+    });
+
+    if (!sessions.length) {
+      return { items: [], total, limit, offset };
+    }
+
+    const ids = sessions.map((s) => s.id);
+
+    const aggRows = await this.turnRepo
+      .createQueryBuilder('t')
+      .select('t.sessionId', 'sessionId')
+      .addSelect('COUNT(*)', 'totalTurns')
+      .addSelect(
+        'SUM(CASE WHEN t.usedRag = 1 THEN 1 ELSE 0 END)',
+        'usedRagTurns',
+      )
+      .where('t.sessionId IN (:...ids)', { ids })
+      .groupBy('t.sessionId')
+      .getRawMany<{
+        sessionId: string;
+        totalTurns: string;
+        usedRagTurns: string | null;
+      }>();
+
+    const aggMap = new Map<
+      string,
+      { totalTurns: number; usedRagTurns: number }
+    >();
+
+    for (const r of aggRows) {
+      aggMap.set(r.sessionId, {
+        totalTurns: Number(r.totalTurns) || 0,
+        usedRagTurns: r.usedRagTurns ? Number(r.usedRagTurns) : 0,
+      });
+    }
+
+    const lastTurns = await this.turnRepo.find({
+      where: { session: { id: In(ids) } },
+      order: {
+        session: { id: 'ASC' },
+        createdAt: 'DESC',
+      },
+    });
+
+    const lastTurnMap = new Map<string, ChatTurn>();
+    for (const t of lastTurns) {
+      const sid = t.session?.id;
+      if (!sid) continue;
+      if (!lastTurnMap.has(sid)) {
+        lastTurnMap.set(sid, t);
+      }
+    }
+
+    const items: SessionListItem[] = sessions.map((s) => {
+      const agg = aggMap.get(s.id) ?? {
+        totalTurns: 0,
+        usedRagTurns: 0,
+      };
+      const lastTurn = lastTurnMap.get(s.id);
+
+      return {
+        id: s.id,
+        userId: s.userId ?? null,
+        title: s.title ?? null,
+        createdAt: s.createdAt.toISOString(),
+        lastActivityAt: s.lastActivityAt
+          ? s.lastActivityAt.toISOString()
+          : null,
+        totalTurns: agg.totalTurns,
+        usedRagTurns: agg.usedRagTurns,
+        lastUserText: lastTurn?.userText ?? null,
+        lastAssistantText: lastTurn?.assistantText ?? null,
+      };
+    });
+
+    return { items, total, limit, offset };
+  }
+
+  async getSessionTurns(
+    sessionId: string,
+    maxTurns = 50,
+  ): Promise<SessionTurnItem[]> {
+    const turns = await this.turnRepo.find({
+      where: { session: { id: sessionId } },
+      order: { createdAt: 'ASC' },
+      take: maxTurns,
+    });
+
+    return turns.map((t) => ({
+      id: t.id,
+      createdAt: t.createdAt.toISOString(),
+      userText: t.userText,
+      assistantText: t.assistantText,
+      mode: t.mode ?? null,
+      usedRag: !!t.usedRag,
+      hitsCount: t.hitsCount ?? 0,
+      latencyMs: t.latencyMs ?? null,
+    }));
   }
 }

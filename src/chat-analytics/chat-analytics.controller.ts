@@ -50,4 +50,24 @@ export class ChatAnalyticsController {
     const topSources = topSourcesStr ? parseInt(topSourcesStr, 10) : 5;
     return this.analytics.getGlobalSummary(days, topSources);
   }
+
+    @Get('sessions')
+  async sessions(
+    @Query('limit') limitStr?: string,
+    @Query('offset') offsetStr?: string,
+    @Query('userId') userId?: string,
+  ) {
+    const limit = limitStr ? parseInt(limitStr, 10) : 20;
+    const offset = offsetStr ? parseInt(offsetStr, 10) : 0;
+    return this.analytics.listSessions(limit, offset, userId);
+  }
+
+  @Get('sessions/:id/turns')
+  async sessionTurns(
+    @Param('id') id: string,
+    @Query('maxTurns') maxStr?: string,
+  ) {
+    const maxTurns = maxStr ? parseInt(maxStr, 10) : 50;
+    return this.analytics.getSessionTurns(id, maxTurns);
+  }
 }
