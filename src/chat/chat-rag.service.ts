@@ -46,12 +46,48 @@ export class ChatRagService {
     return opt?.mode ?? this.defaultMode;
   }
 
+  private shouldUseRagInAuto(
+    userQuery: string,
+    opts?: { tags?: string[] },
+  ): boolean {
+    const q = userQuery.toLowerCase();
+
+    if (opts?.tags?.some((t) => ['rag', 'kb-default'].includes(t))) {
+      return true;
+    }
+
+    if (q.length < 25) {
+      const trivial = ['halo', 'hi', 'hai', 'pagi', 'siang', 'malam', 'thanks', 'terima kasih'];
+      if (trivial.some((w) => q.includes(w))) return false;
+    }
+
+    const domainKeywords = [
+      'rag',
+      'kpi',
+      'scheduler',
+      'qdrant',
+      'llm-gateway',
+      'internal',
+      'kb',
+    ];
+    const hasDomainKeyword = domainKeywords.some((w) => q.includes(w));
+    if (!hasDomainKeyword) return false;
+
+    return true;
+  }
+
   private buildContext(hits: RagSearchHit[]): string {
+    const maxCharsPerChunk = 700;
+
     return hits
-      .map(
-        (h, i) =>
-          `【${i + 1} | ${h.source}${h.uri ? ` | ${h.uri}` : ''}】\n${h.content}`,
-      )
+      .map((h, i) => {
+        const content =
+          h.content.length > maxCharsPerChunk
+            ? h.content.slice(0, maxCharsPerChunk) + '…'
+            : h.content;
+
+        return `【${i + 1} | ${h.source}${h.uri ? ` | ${h.uri}` : ''}】\n${content}`;
+      })
       .join('\n\n');
   }
 
@@ -63,9 +99,7 @@ export class ChatRagService {
     const blocks: string[] = [];
 
     if (historyText) {
-      blocks.push(
-        'RIWAYAT OBROLAN SEBELUMNYA (ringkas):\n' + historyText,
-      );
+      blocks.push('RIWAYAT OBROLAN SEBELUMNYA (ringkas):\n' + historyText);
     }
 
     if (context) {
@@ -142,6 +176,19 @@ export class ChatRagService {
       };
     }
 
+    if (mode === 'auto' && !this.shouldUseRagInAuto(userQuery, { tags: options?.tags })) {
+      const res = await this.llm.chat(
+        this.buildNormalMessages(userQuery, historyText),
+      );
+      return {
+        text: res.text,
+        references: [],
+        mode,
+        usedRag: false,
+        hitsCount: 0,
+      };
+    }
+
     const hits: RagSearchHit[] = await this.rag.search(userQuery, {
       tags: options?.tags,
     });
@@ -157,8 +204,9 @@ export class ChatRagService {
         };
       }
 
-      const messages = this.buildNormalMessages(userQuery, historyText);
-      const res = await this.llm.chat(messages);
+      const res = await this.llm.chat(
+        this.buildNormalMessages(userQuery, historyText),
+      );
 
       return {
         text: res.text,
@@ -169,13 +217,20 @@ export class ChatRagService {
       };
     }
 
-    const context = this.buildContext(hits);
+    hits.sort((a, b) => b.score - a.score);
+
+    let usedHits = hits;
+    if (hits[0]?.score >= 0.85 && hits.length > 2) {
+      usedHits = hits.slice(0, 2);
+    }
+
+    const context = this.buildContext(usedHits);
     const messages = this.buildRagMessages(context, userQuery, historyText);
     const res = await this.llm.chat(messages);
 
     return {
       text: res.text,
-      references: hits.map((h, i) => ({
+      references: usedHits.map((h, i) => ({
         idx: i + 1,
         source: h.source,
         uri: h.uri ?? null,
@@ -206,23 +261,12 @@ export class ChatRagService {
       };
     }
 
-    const hits: RagSearchHit[] = await this.rag.search(userQuery, {
-      tags: options?.tags,
-    });
-
-    if (!hits.length && mode === 'rag-only') {
-      const msg =
-        'Maaf, aku belum menemukan informasi tentang itu di data internal.';
-
-      async function* gen(): AsyncIterable<string> {
-        for (const ch of msg) {
-          yield ch;
-          await new Promise((r) => setTimeout(r, 5));
-        }
-      }
-
+    if (mode === 'auto' && !this.shouldUseRagInAuto(userQuery, { tags: options?.tags })) {
+      const baseStream = await this.llm.stream(
+        this.buildNormalMessages(userQuery, historyText),
+      );
       return {
-        stream: gen(),
+        stream: baseStream,
         references: [],
         mode,
         usedRag: false,
@@ -230,22 +274,62 @@ export class ChatRagService {
       };
     }
 
-    const context = hits.length ? this.buildContext(hits) : undefined;
-    const messages = context
-      ? this.buildRagMessages(context, userQuery, historyText)
-      : this.buildNormalMessages(userQuery, historyText);
+    const hits: RagSearchHit[] = await this.rag.search(userQuery, {
+      tags: options?.tags,
+    });
 
+    if (!hits.length) {
+      if (mode === 'rag-only') {
+        const msg = 'Maaf, aku belum menemukan informasi tentang itu di data internal.';
+
+        async function* gen(): AsyncIterable<string> {
+          for (const ch of msg) {
+            yield ch;
+            await new Promise((r) => setTimeout(r, 5));
+          }
+        }
+
+        return {
+          stream: gen(),
+          references: [],
+          mode,
+          usedRag: false,
+          hitsCount: 0,
+        };
+      }
+
+      const baseStream = await this.llm.stream(
+        this.buildNormalMessages(userQuery, historyText),
+      );
+      return {
+        stream: baseStream,
+        references: [],
+        mode,
+        usedRag: false,
+        hitsCount: 0,
+      };
+    }
+
+    hits.sort((a, b) => b.score - a.score);
+
+    let usedHits = hits;
+    if (hits[0]?.score >= 0.85 && hits.length > 2) {
+      usedHits = hits.slice(0, 2);
+    }
+
+    const context = this.buildContext(usedHits);
+    const messages = this.buildRagMessages(context, userQuery, historyText);
     const baseStream = await this.llm.stream(messages);
 
     return {
       stream: baseStream,
-      references: hits.map((h, i) => ({
+      references: usedHits.map((h, i) => ({
         idx: i + 1,
         source: h.source,
         uri: h.uri ?? null,
       })),
       mode,
-      usedRag: hits.length > 0,
+      usedRag: true,
       hitsCount: hits.length,
     };
   }

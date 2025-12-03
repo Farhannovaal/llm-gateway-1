@@ -1,4 +1,3 @@
-// src/chat/chat.service.ts
 import { Injectable } from '@nestjs/common';
 import { LlmService, ChatMessage } from '../llm/llm.service';
 import { ChatRagService, RagMode } from './chat-rag.service';
@@ -83,18 +82,15 @@ export class ChatService {
     return `Sekarang ${tanggal}, pukul ${jam} WIB.`;
   }
 
-  /** Utility: potong teks panjang supaya history tidak kebablasan */
   private truncate(text: string, max = 400): string {
     if (!text) return '';
     if (text.length <= max) return text;
     return text.slice(0, max) + '…';
   }
 
-  /** Format history turn → string ringkas untuk dimasukkan ke prompt */
   private formatHistory(turns: ChatTurn[]): string {
     if (!turns.length) return '';
 
-    // `getRecentTurns` balikin DESC, kita pengen oldest → newest
     const ordered = [...turns].sort(
       (a, b) => a.createdAt.getTime() - b.createdAt.getTime(),
     );
@@ -113,7 +109,6 @@ export class ChatService {
     const withSys = this.withSystem(messages);
     const q = this.getLastUserText(withSys);
 
-    // Shortcut: tanya tanggal/jam → langsung jawab, tanpa RAG/history.
     if (this.isDateOrTimeQuestion(q)) {
       const text = this.buildNowText();
 
@@ -135,7 +130,6 @@ export class ChatService {
       return { text };
     }
 
-    // --- Ambil history dari DB kalau ada sessionId ---
     let historyText: string | null = null;
     let historyTurnsCount = 0;
 
@@ -188,7 +182,6 @@ export class ChatService {
     const withSys = this.withSystem(messages);
     const q = this.getLastUserText(withSys);
 
-    // Shortcut date/time, sama seperti di chat()
     if (this.isDateOrTimeQuestion(q)) {
       const answer = this.buildNowText();
       const self = this;
@@ -225,7 +218,6 @@ export class ChatService {
       return gen();
     }
 
-    // Ambil history dulu
     let historyText: string | null = null;
     let historyTurnsCount = 0;
 

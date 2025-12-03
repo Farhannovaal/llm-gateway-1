@@ -13,6 +13,9 @@ export interface QdrantUpsertPayload {
   tags?: string[];
   lang?: string;
   title?: string;
+  docId?: string;
+  hash?: string;
+  tokenCount?: number;
 }
 
 @Injectable()
@@ -113,60 +116,63 @@ export class QdrantService implements OnModuleInit {
   }
 
   async upsertMany(items: QdrantUpsertPayload[]) {
-  if (!items.length) {
-    this.logger.warn('upsertMany called with empty items');
-    return;
-  }
-
-  const nowIso = new Date().toISOString();
-
-  for (const it of items) {
-    if (!Array.isArray(it.vector)) {
-      throw new Error('Qdrant upsert: vector is not an array');
+    if (!items.length) {
+      this.logger.warn('upsertMany called with empty items');
+      return;
     }
-    if (it.vector.length !== this.dim) {
+
+    const nowIso = new Date().toISOString();
+
+    for (const it of items) {
+      if (!Array.isArray(it.vector)) {
+        throw new Error('Qdrant upsert: vector is not an array');
+      }
+      if (it.vector.length !== this.dim) {
+        throw new Error(
+          `Qdrant upsert: vector length ${it.vector.length} != expected dim ${this.dim}`,
+        );
+      }
+    }
+
+    const points = items.map((it, i) => ({
+      id: it.id ?? Date.now() + i,
+      vector: it.vector,
+      payload: {
+        content: it.content,
+        source: it.source,
+        uri: it.uri ?? null,
+        tags: it.tags ?? [],
+        lang: it.lang ?? null,
+        title: it.title ?? null,
+        createdAt: nowIso,
+        docId: it.docId ?? null,
+        hash: it.hash ?? null,
+        tokenCount: it.tokenCount ?? null,
+      },
+    }));
+
+    this.logger.log(
+      `Upserting ${points.length} points into ${this.collection} (vectorDim=${points[0].vector.length}, qdrantDim=${this.dim})`,
+    );
+
+    const res = await fetch(
+      `${this.baseUrl}/collections/${this.collection}/points?wait=true`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ points }),
+      },
+    );
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
       throw new Error(
-        `Qdrant upsert: vector length ${it.vector.length} != expected dim ${this.dim}`,
+        `Qdrant upsert failed: ${res.status} ${res.statusText} - ${txt}`,
       );
     }
+
+    return res.json().catch(() => ({}));
   }
-
-  const points = items.map((it, i) => ({
-    id: it.id ?? Date.now() + i,
-    vector: it.vector,
-    payload: {
-      content: it.content,
-      source: it.source,
-      uri: it.uri ?? null,
-      tags: it.tags ?? [],
-      lang: it.lang ?? null,
-      title: it.title ?? null,
-      createdAt: nowIso,
-    },
-  }));
-
-  this.logger.log(
-    `Upserting ${points.length} points into ${this.collection} (vectorDim=${points[0].vector.length}, qdrantDim=${this.dim})`,
-  );
-
-  const res = await fetch(
-    `${this.baseUrl}/collections/${this.collection}/points?wait=true`,
-    {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ points }),
-    },
-  );
-
-  if (!res.ok) {
-    const txt = await res.text().catch(() => '');
-    throw new Error(
-      `Qdrant upsert failed: ${res.status} ${res.statusText} - ${txt}`,
-    );
-  }
-
-  return res.json().catch(() => ({}));
-}
 
   async search(
     queryVector: number[],
@@ -222,5 +228,34 @@ export class QdrantService implements OnModuleInit {
       score: r.score,
       payload: r.payload,
     }));
+  }
+
+  async debugBySource(source: string, limit = 20) {
+    const body = {
+      filter: {
+        must: [{ key: 'source', match: { value: source } }],
+      },
+      with_payload: true,
+      with_vector: false,
+      limit,
+    };
+
+    const res = await fetch(
+      `${this.baseUrl}/collections/${this.collection}/points/scroll`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    );
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      throw new Error(
+        `Qdrant debug scroll failed: ${res.status} ${res.statusText} - ${txt}`,
+      );
+    }
+
+    return res.json();
   }
 }

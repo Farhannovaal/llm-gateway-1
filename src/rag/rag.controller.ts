@@ -1,7 +1,16 @@
-import { Body, Controller, Get, Post, Query, HttpException, HttpStatus } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Post,
+  Query,
+  HttpException,
+  HttpStatus,
+} from '@nestjs/common';
 import { IsArray, IsOptional, IsString, IsUrl } from 'class-validator';
-import { Transform } from 'class-transformer'; 
+import { Transform } from 'class-transformer';
 import { RagService } from './rag.service';
+import { QdrantService } from './qdrant.service';
 
 class IngestDto {
   @IsString()
@@ -59,7 +68,10 @@ class SearchDto {
 
 @Controller('rag')
 export class RagController {
-  constructor(private readonly rag: RagService) {}
+  constructor(
+    private readonly rag: RagService,
+    private readonly qdrant: QdrantService,
+  ) {}
 
   @Post('documents')
   async ingest(@Body() dto: IngestDto) {
@@ -67,9 +79,33 @@ export class RagController {
       return await this.rag.ingest(dto);
     } catch (e: any) {
       const msg = e?.message || String(e);
-      const depDown = /ollama|embed|ECONN|ENOTFOUND|EAI_AGAIN|timeout|fetch failed/i.test(msg);
-      throw new HttpException({ ok: false, error: msg }, depDown ? HttpStatus.SERVICE_UNAVAILABLE : HttpStatus.INTERNAL_SERVER_ERROR);
+      const depDown =
+        /ollama|embed|ECONN|ENOTFOUND|EAI_AGAIN|timeout|fetch failed/i.test(
+          msg,
+        );
+      throw new HttpException(
+        { ok: false, error: msg },
+        depDown
+          ? HttpStatus.SERVICE_UNAVAILABLE
+          : HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
+  }
+
+  @Get('debug/source')
+  async debugBySource(
+    @Query('source') source: string,
+    @Query('limit') limit?: string,
+  ) {
+    if (!source) {
+      throw new HttpException(
+        { ok: false, error: 'source is required' },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    const lim = limit ? Number(limit) || 20 : 20;
+    return this.qdrant.debugBySource(source, lim);
   }
 
   @Get('search')

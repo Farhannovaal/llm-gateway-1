@@ -16,16 +16,16 @@ type UpsertInput = {
 
 export type RagSearchHit = {
   score: number;
-  docId: string;
+  docId?: string;
   source: string;
-  uri?: string;
-  title?: string;
-  lang?: string;
+  uri?: string | null;
+  title?: string | null;
+  lang?: string | null;
   tags?: string[];
-  hash: string;
+  hash?: string | null;
   content: string;
-  tokenCount: number;
-  createdAt: string;
+  tokenCount?: number | null;
+  createdAt?: string;
 };
 
 @Injectable()
@@ -38,6 +38,12 @@ export class RagService {
     private readonly qdrant: QdrantService,
     private readonly embedder: OllamaEmbeddingProvider,
   ) {}
+
+  private estimateTokenCount(text: string): number {
+    if (!text) return 0;
+    const words = text.trim().split(/\s+/g).length;
+    return Math.ceil(words * 1.3);
+  }
 
   async ingest(input: UpsertInput) {
     const docId = input.docId ?? randomUUID();
@@ -64,6 +70,9 @@ export class RagService {
     const hashes = chunks.map((c) =>
       createHash('sha256').update(c).digest('hex'),
     );
+
+    const tokenCounts = chunks.map((c) => this.estimateTokenCount(c));
+
     this.logger.debug(
       `RAG hashes: docId=${docId}, hashesCount=${hashes.length}, firstHash=${hashes[0]}`,
     );
@@ -103,6 +112,9 @@ export class RagService {
           tags: input.tags ?? [],
           lang: input.lang,
           title: input.title,
+          docId,
+          hash: hashes[idx],
+          tokenCount: tokenCounts[idx],
         })),
       );
     } catch (e: any) {
@@ -121,27 +133,29 @@ export class RagService {
   }
 
   async search(
-  query: string,
-  filters?: { tags?: string[]; source?: string },
-): Promise<RagSearchHit[]> {
-  this.logger.log(
-    `RAG search query="${query}", tags=${JSON.stringify(filters?.tags)}, source=${filters?.source}`,
-  );
+    query: string,
+    filters?: { tags?: string[]; source?: string },
+  ): Promise<RagSearchHit[]> {
+    this.logger.log(
+      `RAG search query="${query}", tags=${JSON.stringify(
+        filters?.tags,
+      )}, source=${filters?.source}`,
+    );
 
-  const [qvec] = await this.embedder.embed([query]);
+    const [qvec] = await this.embedder.embed([query]);
 
-  const res = await this.qdrant.search(qvec, {
-    topK: this.topK,
-    minScore: this.minScore,
-    tags: filters?.tags,
-    source: filters?.source,
-  });
+    const res = await this.qdrant.search(qvec, {
+      topK: this.topK,
+      minScore: this.minScore,
+      tags: filters?.tags,
+      source: filters?.source,
+    });
 
-  this.logger.log(`RAG search hits=${res.length}`);
+    this.logger.log(`RAG search hits=${res.length}`);
 
-  return res.map((r: any) => ({
-    score: r.score,
-    ...(r.payload ?? {}),
-  })) as RagSearchHit[];
-}
+              return res.map((r: any) => ({
+      score: r.score,
+      ...(r.payload ?? {}),
+    })) as RagSearchHit[];
+  }
 }

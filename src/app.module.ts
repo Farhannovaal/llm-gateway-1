@@ -14,6 +14,7 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { LlmService } from './llm/llm.service';
 import { ChatDbModule } from './chat-db/chat-db.module';
 import { ChatAnalyticsModule } from './chat-analytics/chat-analytics.module';
+import { KbModule } from './kb/kb.module';
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { ChatAnalyticsModule } from './chat-analytics/chat-analytics.module';
     HealthModule,
     RagModule,
     ChatDbModule,
+    KbModule,
     ChatAnalyticsModule,
   ],
   providers: [

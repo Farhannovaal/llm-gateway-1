@@ -106,7 +106,6 @@ export class LlmService {
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
 
-        // Ollama stream: satu JSON per baris
         for (;;) {
           const idx = buffer.indexOf('\n');
           if (idx === -1) break;
