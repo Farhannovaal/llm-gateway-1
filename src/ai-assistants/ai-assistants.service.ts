@@ -5,7 +5,8 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { AiAssistant, AssistantMode } from '../entities/ai-assistant.entity';
+import { AiAssistant, AssistantMode } from './entities/ai-assistant.entity';
+import { CHAT_DB_CONNECTION } from '../chat-db/chat-db.module';
 
 export interface CreateAssistantDto {
   name: string;
@@ -35,7 +36,7 @@ export interface UpdateAssistantDto {
 @Injectable()
 export class AiAssistantsService {
   constructor(
-    @InjectRepository(AiAssistant)
+    @InjectRepository(AiAssistant, CHAT_DB_CONNECTION)
     private readonly repo: Repository<AiAssistant>,
   ) {}
 
@@ -72,7 +73,9 @@ export class AiAssistantsService {
   async create(dto: CreateAssistantDto): Promise<AiAssistant> {
     const exists = await this.repo.findOne({ where: { slug: dto.slug } });
     if (exists) {
-      throw new BadRequestException(`Assistant slug "${dto.slug}" already exists`);
+      throw new BadRequestException(
+        `Assistant slug "${dto.slug}" already exists`,
+      );
     }
 
     const assistant = this.repo.create({

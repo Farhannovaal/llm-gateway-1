@@ -15,6 +15,8 @@ import { LlmService } from './llm/llm.service';
 import { ChatDbModule } from './chat-db/chat-db.module';
 import { ChatAnalyticsModule } from './chat-analytics/chat-analytics.module';
 import { KbModule } from './kb/kb.module';
+import { AiAppsModule } from './ai-apps/ai-apps.module';
+import { AiAssistantsModule } from './ai-assistants/ai-assistant.module';
 
 @Module({
   imports: [
@@ -32,6 +34,8 @@ import { KbModule } from './kb/kb.module';
     ChatDbModule,
     KbModule,
     ChatAnalyticsModule,
+    AiAppsModule,
+    AiAssistantsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: UserThrottlerGuard },

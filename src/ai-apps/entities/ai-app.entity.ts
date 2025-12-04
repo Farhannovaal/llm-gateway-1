@@ -9,7 +9,7 @@ import {
 @Entity({ name: 'ai_app' })
 export class AiApp {
   @PrimaryGeneratedColumn('uuid')
-  id: string; // char(36)
+  id: string;
 
   @Column({ length: 100 })
   name: string;

@@ -2,7 +2,8 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { randomBytes } from 'crypto';
-import { AiApp } from '../entities/ai-app.entity';
+import { AiApp } from './entities/ai-app.entity';
+import { CHAT_DB_CONNECTION } from '../chat-db/chat-db.module';
 
 export interface CreateAiAppDto {
   name: string;
@@ -24,7 +25,7 @@ export interface UpdateAiAppDto {
 @Injectable()
 export class AiAppsService {
   constructor(
-    @InjectRepository(AiApp)
+    @InjectRepository(AiApp, CHAT_DB_CONNECTION)
     private readonly repo: Repository<AiApp>,
   ) {}
 

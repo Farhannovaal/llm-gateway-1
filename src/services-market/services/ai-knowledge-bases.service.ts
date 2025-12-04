@@ -6,6 +6,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { AiKnowledgeBase } from '../entities/ai-knowledge-base.entity';
+import { CHAT_DB_CONNECTION } from '../../chat-db/chat-db.module';
 
 export interface CreateKnowledgeBaseDto {
   name: string;
@@ -27,7 +28,7 @@ export interface UpdateKnowledgeBaseDto {
 @Injectable()
 export class AiKnowledgeBasesService {
   constructor(
-    @InjectRepository(AiKnowledgeBase)
+    @InjectRepository(AiKnowledgeBase, CHAT_DB_CONNECTION)
     private readonly repo: Repository<AiKnowledgeBase>,
   ) {}
 
@@ -65,7 +66,10 @@ export class AiKnowledgeBasesService {
     return this.repo.save(kb);
   }
 
-  async update(id: string, dto: UpdateKnowledgeBaseDto): Promise<AiKnowledgeBase> {
+  async update(
+    id: string,
+    dto: UpdateKnowledgeBaseDto,
+  ): Promise<AiKnowledgeBase> {
     const kb = await this.findById(id);
 
     if (dto.name !== undefined) kb.name = dto.name;

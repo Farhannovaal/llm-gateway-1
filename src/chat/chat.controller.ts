@@ -20,9 +20,9 @@ import { ChatMessage } from '../llm/llm.service';
 import { HmacGuard } from '../common/guards/hmac.guard';
 import { textToSSE } from '../common/utils/stream';
 
-import { AiAppsService } from '../services-market/services/ai-apps.service';
-import { AiAssistantsService } from '../services-market/services/ai-assistants.service';
-import type { AssistantMode } from '../services-market/entities/ai-assistant.entity';
+import { AiAppsService } from '../ai-apps/ai-apps.service';
+import { AiAssistantsService } from '../ai-assistants/ai-assistants.service';
+import type { AssistantMode } from '../ai-assistants/entities/ai-assistant.entity';
 
 class AskDto {
   @IsString()
@@ -58,6 +58,14 @@ class AskDto {
   @IsOptional()
   @IsString()
   assistant?: string;
+
+  @IsOptional()
+  @IsString()
+  sessionId?: string;
+
+  @IsOptional()
+  @IsString()
+  userId?: string;
 }
 
 @Controller('chat')
@@ -174,12 +182,14 @@ export class ChatController {
       }
     }
 
-    const iter = await this.chatSvc.stream(messages, {
+      const iter = await this.chatSvc.stream(messages, {
       mode: effectiveMode,
       tags: effectiveTags,
       systemPrompt,
       appCode,
       assistantSlug,
+      sessionId: q.sessionId,
+      userId: q.userId,
     });
 
     return textToSSE(iter);
