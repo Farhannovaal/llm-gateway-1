@@ -9,6 +9,10 @@ interface ChatOptions {
   mode?: RagMode;
   sessionId?: string;
   userId?: string;
+
+  systemPrompt?: string | null;
+  appCode?: string | null;
+  assistantSlug?: string | null;
 }
 
 @Injectable()
@@ -21,8 +25,22 @@ export class ChatService {
     private readonly chatLog: ChatLogService,
   ) {}
 
-  private withSystem(messages: ChatMessage[]): ChatMessage[] {
+  private withSystem(
+    messages: ChatMessage[],
+    systemPrompt?: string | null,
+  ): ChatMessage[] {
     const hasSystem = messages.some((m) => m.role === 'system');
+
+    if (systemPrompt && systemPrompt.trim().length > 0) {
+      const sys: ChatMessage = {
+        role: 'system',
+        content: systemPrompt,
+      };
+
+      const withoutSystem = messages.filter((m) => m.role !== 'system');
+      return [sys, ...withoutSystem];
+    }
+
     if (hasSystem) return messages;
 
     const sys: ChatMessage = {
@@ -106,11 +124,15 @@ export class ChatService {
   }
 
   async chat(messages: ChatMessage[], options?: ChatOptions) {
-    const withSys = this.withSystem(messages);
+    const withSys = this.withSystem(messages, options?.systemPrompt);
     const q = this.getLastUserText(withSys);
 
     if (this.isDateOrTimeQuestion(q)) {
       const text = this.buildNowText();
+
+      const metaBase: Record<string, any> = { kind: 'date-time-shortcut' };
+      if (options?.appCode) metaBase.appCode = options.appCode;
+      if (options?.assistantSlug) metaBase.assistantSlug = options.assistantSlug;
 
       await this.chatLog.saveTurn({
         sessionId: options?.sessionId,
@@ -124,7 +146,7 @@ export class ChatService {
         hitsCount: 0,
         modelId: null,
         latencyMs: 0,
-        meta: { kind: 'date-time-shortcut' },
+        meta: metaBase,
       });
 
       return { text };
@@ -152,10 +174,13 @@ export class ChatService {
     });
     const latencyMs = Date.now() - started;
 
-    const meta =
-      historyText && historyTurnsCount > 0
-        ? { usedHistory: true, historyTurns: historyTurnsCount }
-        : null;
+    const meta: Record<string, any> = {};
+    if (historyText && historyTurnsCount > 0) {
+      meta.usedHistory = true;
+      meta.historyTurns = historyTurnsCount;
+    }
+    if (options?.appCode) meta.appCode = options.appCode;
+    if (options?.assistantSlug) meta.assistantSlug = options.assistantSlug;
 
     const { sessionId } = await this.chatLog.saveTurn({
       sessionId: options?.sessionId,
@@ -169,7 +194,7 @@ export class ChatService {
       hitsCount: res.hitsCount,
       modelId: process.env.MODEL_ID || null,
       latencyMs,
-      meta,
+      meta: Object.keys(meta).length ? meta : null,
     });
 
     return { text: res.text, sessionId };
@@ -179,7 +204,7 @@ export class ChatService {
     messages: ChatMessage[],
     options?: ChatOptions,
   ): Promise<AsyncIterable<string>> {
-    const withSys = this.withSystem(messages);
+    const withSys = this.withSystem(messages, options?.systemPrompt);
     const q = this.getLastUserText(withSys);
 
     if (this.isDateOrTimeQuestion(q)) {
@@ -199,6 +224,10 @@ export class ChatService {
 
         const latencyMs = Date.now() - started;
 
+        const metaBase: Record<string, any> = { kind: 'date-time-shortcut' };
+        if (options?.appCode) metaBase.appCode = options.appCode;
+        if (options?.assistantSlug) metaBase.assistantSlug = options.assistantSlug;
+
         await self.chatLog.saveTurn({
           sessionId: options?.sessionId,
           userId: options?.userId,
@@ -211,7 +240,7 @@ export class ChatService {
           hitsCount: 0,
           modelId: null,
           latencyMs,
-          meta: { kind: 'date-time-shortcut' },
+          meta: metaBase,
         });
       }
 
@@ -245,11 +274,6 @@ export class ChatService {
       historyText,
     });
 
-    const meta =
-      historyText && historyTurnsCount > 0
-        ? { usedHistory: true, historyTurns: historyTurnsCount }
-        : null;
-
     const self = this;
 
     async function* wrapped(): AsyncIterable<string> {
@@ -261,6 +285,14 @@ export class ChatService {
       }
 
       const latencyMs = Date.now() - started;
+
+      const meta: Record<string, any> = {};
+      if (historyText && historyTurnsCount > 0) {
+        meta.usedHistory = true;
+        meta.historyTurns = historyTurnsCount;
+      }
+      if (options?.appCode) meta.appCode = options.appCode;
+      if (options?.assistantSlug) meta.assistantSlug = options.assistantSlug;
 
       await self.chatLog.saveTurn({
         sessionId: options?.sessionId,
@@ -274,7 +306,7 @@ export class ChatService {
         hitsCount,
         modelId: process.env.MODEL_ID || null,
         latencyMs,
-        meta,
+        meta: Object.keys(meta).length ? meta : null,
       });
     }
 

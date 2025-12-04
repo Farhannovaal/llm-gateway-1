@@ -20,6 +20,10 @@ import { ChatMessage } from '../llm/llm.service';
 import { HmacGuard } from '../common/guards/hmac.guard';
 import { textToSSE } from '../common/utils/stream';
 
+import { AiAppsService } from '../services-market/services/ai-apps.service';
+import { AiAssistantsService } from '../services-market/services/ai-assistants.service';
+import type { AssistantMode } from '../services-market/entities/ai-assistant.entity';
+
 class AskDto {
   @IsString()
   q!: string;
@@ -41,7 +45,19 @@ class AskDto {
   @Transform(({ value }) =>
     typeof value === 'string' ? value.toLowerCase().trim() : value,
   )
-  mode?: RagMode; 
+  mode?: RagMode;
+
+  @IsOptional()
+  @IsString()
+  appCode?: string;
+
+  @IsOptional()
+  @IsString()
+  apiKey?: string;
+
+  @IsOptional()
+  @IsString()
+  assistant?: string;
 }
 
 @Controller('chat')
@@ -49,7 +65,21 @@ export class ChatController {
   constructor(
     private readonly chatSvc: ChatService,
     private readonly chatRag: ChatRagService,
+    private readonly aiApps: AiAppsService,
+    private readonly aiAssistants: AiAssistantsService,
   ) {}
+
+  private mapAssistantModeToRag(mode: AssistantMode): RagMode {
+    switch (mode) {
+      case 'chat':
+        return 'llm-only';
+      case 'ask':
+        return 'rag-only';
+      case 'auto':
+      default:
+        return 'auto';
+    }
+  }
 
   @Get('ask')
   ask(@Query() q: AskDto) {
@@ -70,13 +100,44 @@ export class ChatController {
       tags?: string[];
       sessionId?: string;
       userId?: string;
+      appCode?: string;
+      apiKey?: string;
+      assistant?: string;
     },
   ) {
+    let effectiveMode: RagMode | undefined = body.mode;
+    let effectiveTags = body.tags;
+    let systemPrompt: string | null = null;
+    let appCode: string | null = null;
+    let assistantSlug: string | null = null;
+
+    if (body.appCode && body.apiKey) {
+      const app = await this.aiApps.validateApp(body.appCode, body.apiKey);
+      appCode = app.code;
+    }
+
+    if (body.assistant) {
+      const asst = await this.aiAssistants.findActiveBySlug(body.assistant);
+      assistantSlug = asst.slug;
+      systemPrompt = asst.systemPrompt;
+
+      if (!effectiveMode && asst.defaultMode) {
+        effectiveMode = this.mapAssistantModeToRag(asst.defaultMode);
+      }
+
+      if ((!effectiveTags || !effectiveTags.length) && asst.kbTags?.length) {
+        effectiveTags = asst.kbTags;
+      }
+    }
+
     return this.chatSvc.chat(body.messages, {
-      mode: body.mode,
-      tags: body.tags,
+      mode: effectiveMode,
+      tags: effectiveTags,
       sessionId: body.sessionId,
       userId: body.userId,
+      systemPrompt,
+      appCode,
+      assistantSlug,
     });
   }
 
@@ -88,9 +149,37 @@ export class ChatController {
       { role: 'user', content: q.q || 'Coba stream jawaban.' },
     ];
 
+    let effectiveMode: RagMode | undefined = q.mode;
+    let effectiveTags = q.tags;
+    let systemPrompt: string | null = null;
+    let appCode: string | null = null;
+    let assistantSlug: string | null = null;
+
+    if (q.appCode && q.apiKey) {
+      const app = await this.aiApps.validateApp(q.appCode, q.apiKey);
+      appCode = app.code;
+    }
+
+    if (q.assistant) {
+      const asst = await this.aiAssistants.findActiveBySlug(q.assistant);
+      assistantSlug = asst.slug;
+      systemPrompt = asst.systemPrompt;
+
+      if (!effectiveMode && asst.defaultMode) {
+        effectiveMode = this.mapAssistantModeToRag(asst.defaultMode);
+      }
+
+      if ((!effectiveTags || !effectiveTags.length) && asst.kbTags?.length) {
+        effectiveTags = asst.kbTags;
+      }
+    }
+
     const iter = await this.chatSvc.stream(messages, {
-      mode: q.mode,
-      tags: q.tags,
+      mode: effectiveMode,
+      tags: effectiveTags,
+      systemPrompt,
+      appCode,
+      assistantSlug,
     });
 
     return textToSSE(iter);
