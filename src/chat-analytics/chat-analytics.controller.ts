@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query } from '@nestjs/common';
+import { Controller, Get, Param, Query,HttpStatus,HttpException } from '@nestjs/common';
 import { ChatAnalyticsService } from './chat-analytics.service';
 
 @Controller('analytics/chat')
@@ -70,4 +70,32 @@ export class ChatAnalyticsController {
     const maxTurns = maxStr ? parseInt(maxStr, 10) : 50;
     return this.analytics.getSessionTurns(id, maxTurns);
   }
+
+  @Get('refs')
+  async getRefsBySource(
+    @Query('source') source?: string,
+    @Query('limit') limitStr?: string,
+    @Query('offset') offsetStr?: string,
+  ) {
+    if (!source) {
+      throw new HttpException(
+        { ok: false, error: 'source is required' },
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+
+    const limit = limitStr ? Number(limitStr) || 50 : 50;
+    const offset = offsetStr ? Number(offsetStr) || 0 : 0;
+
+    try {
+      const result = await this.analytics.getRefsBySource({ source, limit, offset });
+      return { ok: true, ...result };
+    } catch (e: any) {
+      throw new HttpException(
+        { ok: false, error: e?.message || String(e) },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
 }

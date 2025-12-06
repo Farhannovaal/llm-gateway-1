@@ -1,40 +1,40 @@
 import {
   Column,
   CreateDateColumn,
-  UpdateDateColumn,
   Entity,
-  PrimaryGeneratedColumn,
+  PrimaryColumn,
+  UpdateDateColumn,
 } from 'typeorm';
 
-@Entity('kb_document')
+@Entity({ name: 'kb_document' })
 export class KbDocument {
-  @PrimaryGeneratedColumn('uuid')
-  id!: string;
+  @PrimaryColumn({ type: 'char', length: 36 })
+  id: string;
 
   @Column({ type: 'varchar', length: 255 })
-  source!: string;
+  source: string;
 
   @Column({ type: 'varchar', length: 500, nullable: true })
-  uri!: string | null;
+  uri: string | null;
 
   @Column({ type: 'varchar', length: 255, nullable: true })
-  title!: string | null;
+  title: string | null;
 
   @Column({ type: 'varchar', length: 10, nullable: true })
-  lang!: string | null;
+  lang: string | null;
 
   @Column({ type: 'json', nullable: true })
-  tags!: string[] | null;
+  tags: string[] | null;
 
   @Column({ type: 'mediumtext' })
-  text!: string;
+  text: string;
 
   @Column({ type: 'char', length: 64, nullable: true })
-  hash!: string | null;
+  hash: string | null;
 
-  @CreateDateColumn({ type: 'datetime', precision: 6 })
-  createdAt!: Date;
+  @CreateDateColumn({ name: 'createdAt', type: 'datetime' })
+  createdAt: Date;
 
-  @UpdateDateColumn({ type: 'datetime', precision: 6 })
-  updatedAt!: Date;
+  @UpdateDateColumn({ name: 'updatedAt', type: 'datetime' })
+  updatedAt: Date;
 }

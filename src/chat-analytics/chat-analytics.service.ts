@@ -43,6 +43,63 @@ export class ChatAnalyticsService {
     return since;
   }
 
+   async getSources(limit = 500) {
+    return this.turnRepo.query(
+      `
+      SELECT
+        jsonb_path_query_array(references, '$[*].source') AS sources,
+        COUNT(*) as totalRefs
+      FROM chat_turn
+      WHERE references IS NOT NULL
+      GROUP BY sources
+      ORDER BY totalRefs DESC
+      LIMIT $1
+      `,
+      [limit],
+    );
+  }
+
+ async getRefsBySource(params: {
+  source: string;
+  limit?: number;
+  offset?: number;
+}) {
+  const limit = params.limit && params.limit > 0 ? params.limit : 50;
+  const offset = params.offset && params.offset >= 0 ? params.offset : 0;
+
+  const qb = this.turnRepo
+    .createQueryBuilder('t')
+    .innerJoin('t.references', 'r', 'r.source = :source', {
+      source: params.source,
+    })
+    .distinct(true) // kalau 1 turn punya banyak ref dengan source yang sama, hindari duplikat
+    .orderBy('t.createdAt', 'DESC')
+    .take(limit)
+    .skip(offset);
+
+  const [rows, total] = await qb.getManyAndCount();
+
+  const items = rows.map((t) => ({
+    id: t.id,
+    createdAt: t.createdAt,
+    userText: t.userText,
+    assistantText: t.assistantText,
+    mode: t.mode,
+    usedRag: t.usedRag,
+    hitsCount: t.hitsCount,
+    references: t.references ?? [], // ini array ChatReference, bisa kamu map lagi kalau mau
+  }));
+
+  return {
+    items,
+    total,
+    limit,
+    offset,
+  };
+}
+
+
+
   async getDailySummary(days = 30): Promise<DailySummaryItem[]> {
     const since = this.getSince(days);
 
