@@ -72,7 +72,7 @@ export class ChatAnalyticsService {
     .innerJoin('t.references', 'r', 'r.source = :source', {
       source: params.source,
     })
-    .distinct(true) // kalau 1 turn punya banyak ref dengan source yang sama, hindari duplikat
+    .distinct(true)
     .orderBy('t.createdAt', 'DESC')
     .take(limit)
     .skip(offset);
@@ -87,7 +87,7 @@ export class ChatAnalyticsService {
     mode: t.mode,
     usedRag: t.usedRag,
     hitsCount: t.hitsCount,
-    references: t.references ?? [], // ini array ChatReference, bisa kamu map lagi kalau mau
+    references: t.references ?? [],
   }));
 
   return {
