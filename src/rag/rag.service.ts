@@ -3,205 +3,87 @@ import { randomUUID, createHash } from 'crypto';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 
-import { QdrantService } from './qdrant.service';
 import { OllamaEmbeddingProvider } from '../llm/providers/ollama-embedding.provider';
 import { splitRecursive } from './utils/chuncker';
 import { KbDocument } from '../kb/kb-document.entity';
 import { CHAT_DB_CONNECTION } from '../chat-db/chat-db.module';
-
-type UpsertInput = {
-  docId?: string;
-  source: string;
-  uri?: string;
-  title?: string;
-  lang?: string;
-  tags?: string[];
-  text: string;
-};
-
-export type RagSearchHit = {
-  score: number;
-  id?: string | number;
-  docId?: string | null;
-  source: string;
-  uri?: string | null;
-  title?: string | null;
-  lang?: string | null;
-  tags?: string[];
-  hash?: string | null;
-  content: string;
-  tokenCount?: number | null;
-  createdAt?: string | null;
-};
+import { UpsertInput, RagSearchHit } from './interfaces/rag.interfaces';
+import {
+  estimateTokenCount,
+  preprocessText,
+} from './utils/rag-text';
+import { QdrantRagRepository } from './repository/qdrant-rag.repository';
 
 @Injectable()
 export class RagService {
   private readonly logger = new Logger(RagService.name);
 
-  private readonly topK = Number(process.env.RAG_TOP_K ?? 5);
+  private readonly searchTopK = Number(process.env.RAG_SEARCH_TOP_K ?? 32);
   private readonly minScore = Number(process.env.RAG_MIN_SCORE ?? 0.3);
   private readonly reindexBatchSize = Number(
     process.env.RAG_REINDEX_BATCH ?? 32,
   );
 
+  private readonly embedBatchSize = Number(
+    process.env.RAG_EMBED_BATCH_SIZE ?? 32,
+  );
+
+  private readonly maxChunksPerDoc = Number(
+    process.env.RAG_MAX_CHUNKS_PER_DOC ?? 200,
+  );
+
   constructor(
-    private readonly qdrant: QdrantService,
+    private readonly qdrantRepo: QdrantRagRepository,
     private readonly embedder: OllamaEmbeddingProvider,
 
     @InjectRepository(KbDocument, CHAT_DB_CONNECTION)
     private readonly kbRepo: Repository<KbDocument>,
   ) {}
 
-  private estimateTokenCount(text: string): number {
-    if (!text) return 0;
-    const words = text.trim().split(/\s+/g).length;
-    return Math.ceil(words * 1.3);
-  }
-
-  private async deleteChunksByDocId(docId: string) {
-    this.logger.log(`deleteChunksByDocId docId=${docId}`);
-
-    const body = {
-      filter: {
-        must: [{ key: 'docId', match: { value: docId } }],
-      },
-    };
-
-    const res = await fetch(
-      `${this.qdrant.url}/collections/${this.qdrant.collection}/points/delete`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      },
-    );
-
-    if (!res.ok) {
-      const txt = await res.text().catch(() => '');
-      throw new Error(
-        `Failed to delete chunks by docId=${docId}: ${txt || res.statusText}`,
-      );
-    }
-  }
+  // ============================================================
+  // PUBLIC API
+  // ============================================================
 
   async ingest(input: UpsertInput) {
     const rawText = input.text ?? '';
-    const docId = input.docId ?? randomUUID();
+    const hasDocId = Boolean(input.docId);
+
+    const textForIndex = preprocessText(input, this.logger);
 
     this.logger.log(
-      `RAG ingest start: docId=${docId}, source=${input.source}, ` +
-        `textLen=${rawText.length}, tags=${JSON.stringify(input.tags ?? [])}`,
+      `RAG ingest start: docId=${input.docId ?? '(new)'}, source=${
+        input.source
+      }, rawLen=${rawText.length}, indexedLen=${
+        textForIndex.length
+      }, tags=${JSON.stringify(input.tags ?? [])}`,
     );
 
-    const textHash = createHash('sha256').update(rawText).digest('hex');
-
-    let doc = await this.kbRepo.findOne({ where: { id: docId } });
-    const isUpdate = Boolean(doc);
-
-    if (!doc) {
-      doc = this.kbRepo.create({
-        id: docId,
-        source: input.source,
-        uri: input.uri ?? null,
-        title: input.title ?? null,
-        lang: input.lang ?? null,
-        tags: input.tags ?? [],
-        text: rawText,
-        hash: textHash,
-      });
-    } else {
-      doc.source = input.source;
-      doc.uri = input.uri ?? null;
-      doc.title = input.title ?? null;
-      doc.lang = input.lang ?? null;
-      doc.tags = input.tags ?? [];
-      doc.text = rawText;
-      doc.hash = textHash;
-    }
-
-    await this.kbRepo.save(doc);
-
-    if (isUpdate) {
-      try {
-        await this.deleteChunksByDocId(docId);
-      } catch (e: any) {
-        this.logger.error(
-          `Failed to delete old chunks for docId=${docId}: ${e?.message || e}`,
-        );
-        throw e;
-      }
-    }
-
-    const chunks = splitRecursive(rawText);
+    const chunks = splitRecursive(textForIndex);
     this.logger.log(
-      `RAG chunking: docId=${docId}, chunks=${chunks.length}, firstChunk="${
-        chunks[0]?.slice(0, 80) ?? ''
-      }"`,
+      `RAG chunking: docId=${input.docId ?? '(new)'}, chunks=${
+        chunks.length
+      }, firstChunk="${chunks[0]?.slice(0, 80) ?? ''}"`,
     );
 
     if (!chunks.length) {
       throw new Error('No chunks produced from text');
     }
 
-    const hashes = chunks.map((c) =>
-      createHash('sha256').update(c).digest('hex'),
-    );
-    const tokenCounts = chunks.map((c) => this.estimateTokenCount(c));
-
-    this.logger.debug(
-      `RAG hashes: docId=${docId}, hashesCount=${hashes.length}, firstHash=${hashes[0]}`,
-    );
-
-    const vectors = await this.embedder.embed(chunks);
-
-    if (!vectors || vectors.length !== chunks.length) {
-      throw new Error(
-        `Embedding provider returned ${vectors?.length ?? 0}, expected ${
-          chunks.length
-        }`,
+    if (hasDocId) {
+      return this.ingestAsSingleDocument(
+        input.docId as string,
+        input,
+        textForIndex,
+        chunks,
       );
     }
 
-    const dim = vectors[0].length;
-    this.logger.log(
-      `RAG embed: docId=${docId}, vectors=${vectors.length}, dim=${dim}, qdrantDim=${this.qdrant.vectorDim}`,
-    );
-
-    if (dim !== this.qdrant.vectorDim) {
-      throw new Error(
-        `Embedding dim=${dim} does not match Qdrant dim=${this.qdrant.vectorDim}. ` +
-          `Set QDRANT_VECTOR_DIM=${dim} dan recreate collection ${this.qdrant.collection}.`,
-      );
+    if (chunks.length > this.maxChunksPerDoc) {
+      return this.ingestAsMultipleDocuments(input, textForIndex, chunks);
     }
 
-    try {
-      const upserts = chunks.map((content, idx) => ({
-        vector: vectors[idx],
-        content,
-        source: input.source,
-        uri: input.uri ?? undefined,
-        tags: input.tags ?? [],
-        lang: input.lang ?? undefined,
-        title: input.title ?? undefined,
-        docId,
-        hash: hashes[idx],
-        tokenCount: tokenCounts[idx],
-      }));
-
-      await this.qdrant.upsertMany(upserts);
-    } catch (e: any) {
-      this.logger.error(
-        `RagService.ingest failed for docId=${docId}: ${e?.message || e}`,
-        e?.stack,
-      );
-      throw e;
-    }
-
-    this.logger.log(
-      `RAG ingest DONE: docId=${docId}, chunks=${chunks.length} into collection=${this.qdrant.collection}`,
-    );
-
-    return { docId, chunks: chunks.length };
+    const newDocId = randomUUID();
+    return this.ingestAsSingleDocument(newDocId, input, textForIndex, chunks);
   }
 
   async search(
@@ -216,8 +98,8 @@ export class RagService {
 
     const [qvec] = await this.embedder.embed([query]);
 
-    const res = await this.qdrant.search(qvec, {
-      topK: this.topK,
+    const res = await this.qdrantRepo.search(qvec, {
+      topK: this.searchTopK,
       minScore: this.minScore,
       tags: filters?.tags,
       source: filters?.source,
@@ -225,28 +107,12 @@ export class RagService {
 
     this.logger.log(`RAG search hits=${res.length}`);
 
-    return res.map((r: any) => {
-      const payload = r.payload ?? {};
-      return {
-        score: r.score,
-        id: r.id,
-        docId: payload.docId ?? null,
-        source: payload.source ?? filters?.source ?? 'unknown',
-        uri: payload.uri ?? null,
-        title: payload.title ?? null,
-        lang: payload.lang ?? null,
-        tags: payload.tags ?? [],
-        hash: payload.hash ?? null,
-        content: payload.content ?? '',
-        tokenCount: payload.tokenCount ?? null,
-        createdAt: payload.createdAt ?? null,
-      } as RagSearchHit;
-    });
+    return res.map((r: any) => this.mapSearchResultToHit(r, filters));
   }
 
   async getDocumentById(id: string) {
     this.logger.log(`getDocumentById (chunk) id=${id}`);
-    const p = await this.qdrant.getPoint(id);
+    const p = await this.qdrantRepo.getPoint(id);
     if (!p) return null;
 
     const payload = p.payload ?? p;
@@ -273,7 +139,7 @@ export class RagService {
   ) {
     this.logger.log(`updateChunk pointId=${pointId}`);
 
-    const existing = await this.qdrant.getPoint(pointId);
+    const existing = await this.qdrantRepo.getPoint(pointId);
     if (!existing) {
       throw new Error('point not found');
     }
@@ -292,11 +158,11 @@ export class RagService {
       content: newContent,
       title: opts?.title ?? payload.title ?? undefined,
       tags: opts?.tags ?? payload.tags ?? [],
-      tokenCount: this.estimateTokenCount(newContent),
+      tokenCount: estimateTokenCount(newContent),
       hash: createHash('sha256').update(newContent).digest('hex'),
     };
 
-    await this.qdrant.upsertMany([
+    await this.qdrantRepo.upsertMany([
       {
         id: pointId,
         vector,
@@ -319,30 +185,7 @@ export class RagService {
     this.logger.log(`deleteBySource source=${source}`);
     if (!source) throw new Error('source is required');
 
-    if (typeof (this.qdrant as any).deleteBySource === 'function') {
-      await (this.qdrant as any).deleteBySource(source);
-    } else {
-      const body = {
-        filter: {
-          must: [{ key: 'source', match: { value: source } }],
-        },
-      };
-
-      const res = await fetch(
-        `${this.qdrant.url}/collections/${this.qdrant.collection}/points/delete`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        },
-      );
-
-      if (!res.ok) {
-        const txt = await res.text().catch(() => '');
-        throw new Error(`Failed to delete docs by source: ${txt}`);
-      }
-    }
-
+    await this.qdrantRepo.deleteBySource(source);
     await this.kbRepo.delete({ source });
 
     return { ok: true };
@@ -362,27 +205,7 @@ export class RagService {
         ? Number(id)
         : (id as string);
 
-    if (typeof (this.qdrant as any).deletePoints === 'function') {
-      return await (this.qdrant as any).deletePoints([normalizedId]);
-    }
-
-    const body = { points: [normalizedId] };
-
-    const res = await fetch(
-      `${this.qdrant.url}/collections/${this.qdrant.collection}/points/delete`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      },
-    );
-
-    if (!res.ok) {
-      const t = await res.text().catch(() => '');
-      throw new Error(`Failed to delete chunk: ${t}`);
-    }
-
-    return { ok: true };
+    return this.qdrantRepo.deletePoints([normalizedId]);
   }
 
   async listDocuments(params: {
@@ -420,14 +243,6 @@ export class RagService {
     const batchSize = Math.max(1, this.reindexBatchSize);
     let processed = 0;
 
-    const iter =
-      typeof (this.qdrant as any).iteratePoints === 'function'
-        ? (this.qdrant as any).iteratePoints({
-            source: source ?? undefined,
-            batchSize,
-          })
-        : null;
-
     const batchContents: string[] = [];
     const batchPoints: any[] = [];
 
@@ -462,11 +277,11 @@ export class RagService {
             payload.hash ??
             createHash('sha256').update(content).digest('hex'),
           tokenCount:
-            payload.tokenCount ?? this.estimateTokenCount(content ?? ''),
+            payload.tokenCount ?? estimateTokenCount(content ?? ''),
         };
       });
 
-      await this.qdrant.upsertMany(upserts);
+      await this.qdrantRepo.upsertMany(upserts);
 
       processed += upserts.length;
       if (progressCb) progressCb({ processed });
@@ -475,78 +290,23 @@ export class RagService {
       batchPoints.length = 0;
     };
 
-    if (iter && typeof (iter as any)[Symbol.asyncIterator] === 'function') {
-      // path: QdrantService menyediakan iteratePoints
-      for await (const p of iter as AsyncIterable<any>) {
-        const payload = p.payload ?? {};
-        const content = payload.content ?? '';
-        if (!content) {
-          processed++;
-          if (progressCb) progressCb({ processed });
-          continue;
-        }
-
-        batchPoints.push(p);
-        batchContents.push(content);
-
-        if (batchContents.length >= batchSize) {
-          await flushBatch();
-        }
+    for await (const p of this.qdrantRepo.iteratePoints({
+      source: source ?? undefined,
+      batchSize,
+    })) {
+      const payload = p.payload ?? {};
+      const content = payload.content ?? '';
+      if (!content) {
+        processed++;
+        if (progressCb) progressCb({ processed });
+        continue;
       }
-    } else {
-      const pageSize = batchSize;
-      let offset = 0;
-      while (true) {
-        const scrollBody: any = {
-          limit: pageSize,
-          offset,
-          with_payload: true,
-          with_vector: false,
-        };
-        if (source) {
-          scrollBody.filter = {
-            must: [{ key: 'source', match: { value: source } }],
-          };
-        }
 
-        const res = await fetch(
-          `${this.qdrant.url}/collections/${this.qdrant.collection}/points/scroll`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(scrollBody),
-          },
-        );
+      batchPoints.push(p);
+      batchContents.push(content);
 
-        if (!res.ok) {
-          const txt = await res.text().catch(() => '');
-          throw new Error(
-            `Qdrant scroll failed during reindex: ${txt || res.statusText}`,
-          );
-        }
-
-        const j = await res.json();
-        const pts: any[] = j?.result?.points ?? j?.result ?? j?.points ?? [];
-        if (!pts.length) break;
-
-        for (const p of pts) {
-          const payload = p.payload ?? {};
-          const content = payload.content ?? '';
-          if (!content) {
-            processed++;
-            if (progressCb) progressCb({ processed });
-            continue;
-          }
-          batchPoints.push(p);
-          batchContents.push(content);
-
-          if (batchContents.length >= batchSize) {
-            await flushBatch();
-          }
-        }
-
-        offset += pts.length;
-        if (pts.length < pageSize) break;
+      if (batchContents.length >= batchSize) {
+        await flushBatch();
       }
     }
 
@@ -564,8 +324,7 @@ export class RagService {
   async deleteDocumentById(id: string) {
     if (!id) throw new Error('id is required');
 
-    await this.deleteChunksByDocId(id);
-
+    await this.qdrantRepo.deleteByDocId(id);
     await this.kbRepo.delete({ id });
 
     return { ok: true };
@@ -589,4 +348,282 @@ export class RagService {
     }));
   }
 
+  // ============================================================
+  // PRIVATE HELPERS
+  // ============================================================
+
+  private mapSearchResultToHit(
+    r: any,
+    filters?: { source?: string },
+  ): RagSearchHit {
+    const payload = r.payload ?? {};
+    return {
+      score: r.score,
+      id: r.id,
+      docId: payload.docId ?? null,
+      source: payload.source ?? filters?.source ?? 'unknown',
+      uri: payload.uri ?? null,
+      title: payload.title ?? null,
+      lang: payload.lang ?? null,
+      tags: payload.tags ?? [],
+      hash: payload.hash ?? null,
+      content: payload.content ?? '',
+      tokenCount: payload.tokenCount ?? null,
+      createdAt: payload.createdAt ?? null,
+    };
+  }
+
+  private async embedChunks(
+    chunks: string[],
+    logId: string,
+  ): Promise<number[][]> {
+    const vectors: number[][] = [];
+    const batchSize = Math.max(1, this.embedBatchSize);
+
+    for (let i = 0; i < chunks.length; i += batchSize) {
+      const batch = chunks.slice(i, i + batchSize);
+      this.logger.log(
+        `RAG embed batch: id=${logId}, batch=${i / batchSize + 1}, size=${
+          batch.length
+        }`,
+      );
+
+      const v = await this.embedder.embed(batch);
+
+      if (!v || v.length !== batch.length) {
+        throw new Error(
+          `Embedding provider returned ${v?.length ?? 0} vectors for batch of ${
+            batch.length
+          } chunks (id=${logId})`,
+        );
+      }
+
+      vectors.push(...v);
+    }
+
+    return vectors;
+  }
+
+  private validateEmbeddingDim(vectors: number[][], contextId: string) {
+    if (!vectors.length) {
+      throw new Error(
+        `No vectors produced for contextId=${contextId}`,
+      );
+    }
+
+    const dim = vectors[0].length;
+    this.logger.log(
+      `RAG embed: contextId=${contextId}, vectors=${vectors.length}, dim=${dim}, qdrantDim=${this.qdrantRepo.vectorDim}`,
+    );
+
+    if (dim !== this.qdrantRepo.vectorDim) {
+      throw new Error(
+        `Embedding dim=${dim} does not match Qdrant dim=${this.qdrantRepo.vectorDim}. ` +
+          `Set QDRANT_VECTOR_DIM=${dim} dan recreate collection ${this.qdrantRepo.collection}.`,
+      );
+    }
+  }
+
+  private async ingestAsSingleDocument(
+    docId: string,
+    input: UpsertInput,
+    textForIndex: string,
+    chunks: string[],
+  ) {
+    const textHash = createHash('sha256').update(textForIndex).digest('hex');
+
+    let doc = await this.kbRepo.findOne({ where: { id: docId } });
+    const isUpdate = Boolean(doc);
+
+    if (!doc) {
+      doc = this.kbRepo.create({
+        id: docId,
+        source: input.source,
+        uri: input.uri ?? null,
+        title: input.title ?? null,
+        lang: input.lang ?? null,
+        tags: input.tags ?? [],
+        text: textForIndex,
+        hash: textHash,
+      });
+    } else {
+      doc.source = input.source;
+      doc.uri = input.uri ?? null;
+      doc.title = input.title ?? null;
+      doc.lang = input.lang ?? null;
+      doc.tags = input.tags ?? [];
+      doc.text = textForIndex;
+      doc.hash = textHash;
+    }
+
+    await this.kbRepo.save(doc);
+
+    if (isUpdate) {
+      try {
+        await this.qdrantRepo.deleteByDocId(docId);
+      } catch (e: any) {
+        this.logger.error(
+          `Failed to delete old chunks for docId=${docId}: ${e?.message || e}`,
+        );
+        throw e;
+      }
+    }
+
+    const hashes = chunks.map((c) =>
+      createHash('sha256').update(c).digest('hex'),
+    );
+    const tokenCounts = chunks.map((c) => estimateTokenCount(c));
+
+    this.logger.debug(
+      `RAG hashes: docId=${docId}, hashesCount=${hashes.length}, firstHash=${hashes[0]}`,
+    );
+
+    const vectors = await this.embedChunks(chunks, docId);
+
+    if (!vectors.length || vectors.length !== chunks.length) {
+      throw new Error(
+        `Total vectors=${vectors.length} does not match chunks=${chunks.length} for docId=${docId}`,
+      );
+    }
+
+    this.validateEmbeddingDim(vectors, docId);
+
+    try {
+      const upserts = chunks.map((content, idx) => ({
+        vector: vectors[idx],
+        content,
+        source: input.source,
+        uri: input.uri ?? undefined,
+        tags: input.tags ?? [],
+        lang: input.lang ?? undefined,
+        title: input.title ?? undefined,
+        docId,
+        hash: hashes[idx],
+        tokenCount: tokenCounts[idx],
+      }));
+
+      await this.qdrantRepo.upsertMany(upserts);
+    } catch (e: any) {
+      this.logger.error(
+        `RagService.ingest failed for docId=${docId}: ${e?.message || e}`,
+        e?.stack,
+      );
+      throw e;
+    }
+
+    this.logger.log(
+      `RAG ingest DONE (single): docId=${docId}, chunks=${chunks.length} into collection=${this.qdrantRepo.collection}`,
+    );
+
+    return { docId, chunks: chunks.length };
+  }
+
+  private async ingestAsMultipleDocuments(
+    input: UpsertInput,
+    textForIndex: string,
+    chunks: string[],
+  ) {
+    const groupId = randomUUID();
+    const totalChunks = chunks.length;
+    const totalParts = Math.ceil(totalChunks / this.maxChunksPerDoc);
+
+    this.logger.log(
+      `RAG ingest multi-doc: groupId=${groupId}, source=${input.source}, chunks=${totalChunks}, parts=${totalParts}`,
+    );
+
+    const groupTag = `kb-group:${groupId}`;
+
+    const hashes = chunks.map((c) =>
+      createHash('sha256').update(c).digest('hex'),
+    );
+    const tokenCounts = chunks.map((c) => estimateTokenCount(c));
+
+    const vectors = await this.embedChunks(chunks, groupId);
+
+    if (!vectors.length || vectors.length !== chunks.length) {
+      throw new Error(
+        `Total vectors=${vectors.length} does not match chunks=${chunks.length} for groupId=${groupId}`,
+      );
+    }
+
+    this.validateEmbeddingDim(vectors, groupId);
+
+    const allUpserts: any[] = [];
+
+    for (let partIndex = 0; partIndex < totalParts; partIndex++) {
+      const start = partIndex * this.maxChunksPerDoc;
+      const end = Math.min(start + this.maxChunksPerDoc, totalChunks);
+
+      const partChunks = chunks.slice(start, end);
+      const partVectors = vectors.slice(start, end);
+      const partHashes = hashes.slice(start, end);
+      const partTokenCounts = tokenCounts.slice(start, end);
+
+      const partDocId = randomUUID();
+      const partText = partChunks.join('\n\n');
+      const partHash = createHash('sha256').update(partText).digest('hex');
+      const partTitleBase = input.title ?? 'Untitled';
+      const partTitle =
+        totalParts > 1
+          ? `${partTitleBase} (bagian ${partIndex + 1}/${totalParts})`
+          : partTitleBase;
+
+      const partTags = [
+        ...(input.tags ?? []),
+        groupTag,
+        `kb-part:${partIndex + 1}/${totalParts}`,
+      ];
+
+      const kbDoc = this.kbRepo.create({
+        id: partDocId,
+        source: input.source,
+        uri: input.uri ?? null,
+        title: partTitle,
+        lang: input.lang ?? null,
+        tags: partTags,
+        text: partText,
+        hash: partHash,
+      });
+
+      await this.kbRepo.save(kbDoc);
+
+      this.logger.log(
+        `RAG ingest multi-doc: saved KbDocument partDocId=${partDocId}, ` +
+          `part=${partIndex + 1}/${totalParts}, chunks=${partChunks.length}`,
+      );
+
+      for (let i = 0; i < partChunks.length; i++) {
+        allUpserts.push({
+          vector: partVectors[i],
+          content: partChunks[i],
+          source: input.source,
+          uri: input.uri ?? undefined,
+          tags: partTags,
+          lang: input.lang ?? undefined,
+          title: partTitle,
+          docId: partDocId,
+          hash: partHashes[i],
+          tokenCount: partTokenCounts[i],
+        });
+      }
+    }
+
+    try {
+      await this.qdrantRepo.upsertMany(allUpserts);
+    } catch (e: any) {
+      this.logger.error(
+        `RagService.ingest (multi) failed for groupId=${groupId}: ${
+          e?.message || e
+        }`,
+        e?.stack,
+      );
+      throw e;
+    }
+
+    this.logger.log(
+      `RAG ingest DONE (multi): groupId=${groupId}, parts=${totalParts}, chunks=${totalChunks} into collection=${this.qdrantRepo.collection}`,
+    );
+
+    return { docId: groupId, chunks: totalChunks };
+  }
 }

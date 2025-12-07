@@ -23,6 +23,24 @@ import { QdrantService } from './qdrant.service';
 import { randomUUID } from 'crypto';
 import { fetchAndIngestUrl } from './fetch-worker';
 
+import { PDFParse } from 'pdf-parse';
+
+async function extractTextFromFile(
+  file: { buffer: Buffer; mimetype: string },
+): Promise<string> {
+  if (file.mimetype === 'application/pdf') {
+    const parser = new PDFParse({ data: file.buffer });
+    const result = await parser.getText();
+    return (result?.text || '').trim();
+  }
+
+  if (file.mimetype.startsWith('text/')) {
+    return file.buffer.toString('utf8');
+  }
+
+  return file.buffer.toString('utf8');
+}
+
 class IngestDto {
   @IsString()
   source!: string;
@@ -354,20 +372,65 @@ export class RagController {
     }
 
     const jobId = randomUUID();
+    const source = body.source ?? 'upload';
+    const tags = body.tags
+      ? body.tags
+          .split(',')
+          .map((t) => t.trim())
+          .filter(Boolean)
+      : [];
+
     this.jobs[jobId] = {
       status: 'queued',
       detail: {
         filename: file.originalname,
         size: file.size,
         receivedAt: new Date().toISOString(),
-        meta: body,
+        source,
+        tags,
       },
     };
+
+    const fileBuffer = file.buffer as Buffer;
+
+    (async () => {
+      try {
+        this.jobs[jobId].status = 'running';
+
+        const text = await extractTextFromFile({
+          buffer: fileBuffer,
+          mimetype: file.mimetype,
+        });
+
+        if (!text || text.length < 20) {
+          throw new Error('Extracted text is empty or too short');
+        }
+
+        const result = await this.rag.ingest({
+          source,
+          text,
+          title: file.originalname,
+          tags,
+        });
+
+        this.jobs[jobId].status = 'done';
+        this.jobs[jobId].detail = {
+          ...(this.jobs[jobId].detail ?? {}),
+          result,
+        };
+      } catch (err: any) {
+        this.jobs[jobId].status = 'failed';
+        this.jobs[jobId].detail = {
+          ...(this.jobs[jobId].detail ?? {}),
+          error: err?.message ?? String(err),
+        };
+      }
+    })();
 
     return {
       ok: true,
       jobId,
-      message: 'File received. Extraction should be handled by worker.',
+      message: 'File received, processing in background',
     };
   }
 
@@ -481,5 +544,4 @@ export class RagController {
       );
     }
   }
-
 }

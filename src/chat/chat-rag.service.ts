@@ -1,34 +1,20 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { LlmService, ChatMessage } from '../llm/llm.service';
-import { RagService, RagSearchHit } from '../rag/rag.service';
+import { RagService } from '../rag/rag.service';
+import { RagSearchHit } from '../rag/interfaces/rag.interfaces';
+import {
+  ChatRagOptions,
+  ChatRagAnswer,
+  ChatRagStreamResult,
+} from './interface/chat-rag.interface';
 
 export type RagMode = 'auto' | 'rag-only' | 'llm-only';
 
-export interface ChatRagOptions {
-  tags?: string[];
-  mode?: RagMode;
-  historyText?: string | null;
-}
-
-export interface ChatRagAnswer {
-  text: string;
-  references: { idx: number; source: string; uri: string | null }[];
-  mode: RagMode;
-  usedRag: boolean;
-  hitsCount: number;
-}
-
-export interface ChatRagStreamResult {
-  stream: AsyncIterable<string>;
-  references: { idx: number; source: string; uri: string | null }[];
-  mode: RagMode;
-  usedRag: boolean;
-  hitsCount: number;
-}
-
 @Injectable()
 export class ChatRagService {
+  private readonly logger = new Logger(ChatRagService.name);
   private readonly defaultMode: RagMode;
+  private readonly topK = Number(process.env.RAG_TOP_K ?? 5);
 
   constructor(
     private readonly llm: LlmService,
@@ -40,6 +26,39 @@ export class ChatRagService {
     } else {
       this.defaultMode = 'auto';
     }
+  }
+
+  private extractBoltSizeToken(q: string): string | null {
+    const m = q.match(/\bM\d+(?:x\d+(?:\.\d+)?)?\b/i);
+    return m ? m[0] : null;
+  }
+
+
+  private rerankHits(hits: RagSearchHit[], userQuery: string): RagSearchHit[] {
+    const sizeToken = this.extractBoltSizeToken(userQuery);
+    if (!sizeToken) {
+      return [...hits].sort((a, b) => b.score - a.score);
+    }
+
+    const tokenLower = sizeToken.toLowerCase();
+
+    const sorted = [...hits].sort((a, b) => {
+      const aHas = (a.content ?? '').toLowerCase().includes(tokenLower);
+      const bHas = (b.content ?? '').toLowerCase().includes(tokenLower);
+
+      if (aHas && !bHas) return -1;
+      if (!aHas && bHas) return 1;
+
+      return b.score - a.score;
+    });
+
+    this.logger.debug(
+      `RAG rerankHits with sizeToken="${sizeToken}", ` +
+        `beforeTopScore=${hits[0]?.score.toFixed(3)}, ` +
+        `afterTopScore=${sorted[0]?.score.toFixed(3)}`,
+    );
+
+    return sorted;
   }
 
   private resolveMode(opt?: ChatRagOptions): RagMode {
@@ -76,19 +95,35 @@ export class ChatRagService {
     return true;
   }
 
+  // =========================
+  // Context builder
+  // =========================
   private buildContext(hits: RagSearchHit[]): string {
-    const maxCharsPerChunk = 700;
+    const maxCharsPerChunk = 800;
+    const maxTotalChars = 4000;
 
-    return hits
-      .map((h, i) => {
-        const content =
-          h.content.length > maxCharsPerChunk
-            ? h.content.slice(0, maxCharsPerChunk) + '…'
-            : h.content;
+    const blocks: string[] = [];
+    let total = 0;
 
-        return `【${i + 1} | ${h.source}${h.uri ? ` | ${h.uri}` : ''}】\n${content}`;
-      })
-      .join('\n\n');
+    for (let i = 0; i < hits.length; i++) {
+      const h = hits[i];
+      let content = h.content ?? '';
+
+      if (content.length > maxCharsPerChunk) {
+        content = content.slice(0, maxCharsPerChunk) + '…';
+      }
+
+      const block = `【${i + 1} | ${h.source}${h.uri ? ` | ${h.uri}` : ''}】\n${content}`;
+
+      if (total + block.length > maxTotalChars) {
+        break;
+      }
+
+      blocks.push(block);
+      total += block.length;
+    }
+
+    return blocks.join('\n\n');
   }
 
   private buildUserContent(
@@ -189,7 +224,7 @@ export class ChatRagService {
       };
     }
 
-    const hits: RagSearchHit[] = await this.rag.search(userQuery, {
+    let hits: RagSearchHit[] = await this.rag.search(userQuery, {
       tags: options?.tags,
     });
 
@@ -217,12 +252,45 @@ export class ChatRagService {
       };
     }
 
-    hits.sort((a, b) => b.score - a.score);
+    const sizeToken = this.extractBoltSizeToken(userQuery);
+    if (sizeToken) {
+      const tokenLower = sizeToken.toLowerCase();
+      const hasSizeToken = hits.some((h) =>
+        (h.content ?? '').toLowerCase().includes(tokenLower),
+      );
 
-    let usedHits = hits;
-    if (hits[0]?.score >= 0.85 && hits.length > 2) {
-      usedHits = hits.slice(0, 2);
+      if (!hasSizeToken) {
+        this.logger.warn(
+          `No hit contains sizeToken="${sizeToken}" with tags=${JSON.stringify(
+            options?.tags,
+          )}, retrying search WITHOUT tags`,
+        );
+
+        const hitsWithoutTags = await this.rag.search(userQuery, {
+          tags: undefined,
+        });
+
+        if (hitsWithoutTags.length) {
+          hits = hitsWithoutTags;
+        }
+      }
     }
+
+    const rankedHits = this.rerankHits(hits, userQuery);
+    const usedHits = rankedHits.slice(0, this.topK);
+
+    this.logger.debug(
+      `RAG usedHits for query="${userQuery}": ` +
+        usedHits
+          .map(
+            (h, idx) =>
+              `#${idx + 1} score=${h.score.toFixed(3)} docId=${h.docId} ` +
+              `source=${h.source} snippet="${(h.content ?? '')
+                .slice(0, 120)
+                .replace(/\s+/g, ' ')}"`,
+          )
+          .join(' | '),
+    );
 
     const context = this.buildContext(usedHits);
     const messages = this.buildRagMessages(context, userQuery, historyText);
@@ -274,7 +342,7 @@ export class ChatRagService {
       };
     }
 
-    const hits: RagSearchHit[] = await this.rag.search(userQuery, {
+    let hits: RagSearchHit[] = await this.rag.search(userQuery, {
       tags: options?.tags,
     });
 
@@ -310,12 +378,45 @@ export class ChatRagService {
       };
     }
 
-    hits.sort((a, b) => b.score - a.score);
+    const sizeToken = this.extractBoltSizeToken(userQuery);
+    if (sizeToken) {
+      const tokenLower = sizeToken.toLowerCase();
+      const hasSizeToken = hits.some((h) =>
+        (h.content ?? '').toLowerCase().includes(tokenLower),
+      );
 
-    let usedHits = hits;
-    if (hits[0]?.score >= 0.85 && hits.length > 2) {
-      usedHits = hits.slice(0, 2);
+      if (!hasSizeToken) {
+        this.logger.warn(
+          `[stream] No hit contains sizeToken="${sizeToken}" with tags=${JSON.stringify(
+            options?.tags,
+          )}, retrying search WITHOUT tags`,
+        );
+
+        const hitsWithoutTags = await this.rag.search(userQuery, {
+          tags: undefined,
+        });
+
+        if (hitsWithoutTags.length) {
+          hits = hitsWithoutTags;
+        }
+      }
     }
+
+    const rankedHits = this.rerankHits(hits, userQuery);
+    const usedHits = rankedHits.slice(0, this.topK);
+
+    this.logger.debug(
+      `RAG usedHits (stream) for query="${userQuery}": ` +
+        usedHits
+          .map(
+            (h, idx) =>
+              `#${idx + 1} score=${h.score.toFixed(3)} docId=${h.docId} ` +
+              `source=${h.source} snippet="${(h.content ?? '')
+                .slice(0, 120)
+                .replace(/\s+/g, ' ')}"`,
+          )
+          .join(' | '),
+    );
 
     const context = this.buildContext(usedHits);
     const messages = this.buildRagMessages(context, userQuery, historyText);

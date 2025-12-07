@@ -1,19 +1,18 @@
+// src/rag/rag.module.ts
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
-import { RagController } from './rag.controller';
+import { KbDocument } from '../kb/kb-document.entity';
+import { CHAT_DB_CONNECTION } from '../chat-db/chat-db.module';
+
 import { RagService } from './rag.service';
+import { QdrantRagRepository } from './repository/qdrant-rag.repository';
 import { QdrantService } from './qdrant.service';
 import { OllamaEmbeddingProvider } from '../llm/providers/ollama-embedding.provider';
-import { CHAT_DB_CONNECTION } from '../chat-db/chat-db.module';
-import { KbDocument } from '../kb/kb-document.entity';
 
 @Module({
-  imports: [
-    TypeOrmModule.forFeature([KbDocument], CHAT_DB_CONNECTION),
-  ],
-  controllers: [RagController],
-  providers: [RagService, QdrantService, OllamaEmbeddingProvider],
+  imports: [TypeOrmModule.forFeature([KbDocument], CHAT_DB_CONNECTION)],
+  providers: [RagService, QdrantRagRepository, QdrantService, OllamaEmbeddingProvider],
   exports: [RagService],
 })
 export class RagModule {}
