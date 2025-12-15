@@ -23,6 +23,16 @@ async function bootstrap() {
     }),
   );
 
+  app.enableCors({
+    origin: [
+      'http://localhost:5173',
+      'https://mforcedev.cloud',
+      'https://llm-gateway.mforcedev.cloud',
+    ],
+    credentials: true,
+  });
+
+
   app.use((req: Request, res: Response, next: NextFunction) => {
     const t0 = Date.now();
     res.on('finish', () => {
