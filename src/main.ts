@@ -12,10 +12,15 @@ process.on('uncaughtException', (e) =>
 );
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, { cors: true });
+  const app = await NestFactory.create(AppModule);
   const logger = new Logger('Bootstrap');
 
-  app.use(helmet({ crossOriginResourcePolicy: false }));
+  app.use(
+    helmet({
+      crossOriginResourcePolicy: false,
+    }),
+  );
+
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -24,22 +29,17 @@ async function bootstrap() {
   );
 
   app.enableCors({
-    origin: [
-      'http://localhost:5173',
-      'https://mforcedev.cloud',
-      'https://llm-gateway.mforcedev.cloud',
-    ],
-    credentials: true,
+    origin: true,        
+    credentials: true, 
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+    allowedHeaders: '*',
   });
 
-
   app.use((req: Request, res: Response, next: NextFunction) => {
-    const t0 = Date.now();
+    const start = Date.now();
     res.on('finish', () => {
       console.log(
-        `[HTTP] ${req.method} ${req.url} -> ${res.statusCode} ${
-          Date.now() - t0
-        }ms`,
+        `[HTTP] ${req.method} ${req.originalUrl} -> ${res.statusCode} ${Date.now() - start}ms`,
       );
     });
     next();
@@ -49,6 +49,7 @@ async function bootstrap() {
 
   const port = Number.parseInt(process.env.PORT ?? '3000', 10);
   const host = process.env.HOST ?? '0.0.0.0';
+
   await app.listen(port, host);
   logger.log(`HTTP listening at http://${host}:${port}`);
 }
