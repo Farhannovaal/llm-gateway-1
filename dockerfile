@@ -1,18 +1,31 @@
+# ========================
+# BUILD STAGE
+# ========================
 FROM node:20-alpine AS builder
+
 WORKDIR /app
 
 ENV NODE_ENV=development
-ENV NPM_CONFIG_PRODUCTION=false
 
 COPY package*.json ./
-RUN npm install --include=dev
+RUN npm install
 
 COPY . .
 
-RUN npm run build   # <-- gunakan script, bukan npx
+RUN npm run build
 
+
+# ========================
+# RUNNER STAGE
+# ========================
 FROM node:20-alpine AS runner
+
 WORKDIR /app
+
+# install curl untuk healthcheck
+RUN apk add --no-cache curl
+
+ENV NODE_ENV=production
 
 COPY package*.json ./
 RUN npm install --omit=dev

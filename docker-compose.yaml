@@ -1,32 +1,48 @@
 services:
   llm-gateway:
-    build: .
+    build: ./llm-gateway-1
     ports:
       - "3000:3000"
     env_file:
       - .env
     environment:
       - NODE_ENV=production
-      - NODE_OPTIONS=--max_old_space_size=2048 
+      - NODE_OPTIONS=--max_old_space_size=2048
     restart: unless-stopped
     depends_on:
-      qdrant:
-        condition: service_started
+      - qdrant
+      - ollama
+      - mysql
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/readyz"]
       interval: 15s
       timeout: 5s
       retries: 5
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+
+  mysql:
+    image: mysql:8
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: chat_ai_db
+      MYSQL_USER: user
+      MYSQL_PASSWORD: password
+    volumes:
+      - mysql:/var/lib/mysql
 
   qdrant:
     image: qdrant/qdrant:latest
-    ports:
-      - "6333:6333"
+    restart: unless-stopped
     volumes:
       - qdrant:/qdrant/storage
+
+  ollama:
+    image: ollama/ollama:latest
     restart: unless-stopped
+    volumes:
+      - ollama:/root/.ollama
 
 volumes:
+  mysql: {}
   qdrant: {}
+  ollama: {}
